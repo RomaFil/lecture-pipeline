@@ -39,13 +39,17 @@ $VideoExt = @('.mkv', '.mp4', '.m4v', '.mov', '.webm', '.flv')
 # запис, змінений щойно, може ще писатись OBS — не чіпаємо
 $SettleSeconds = 60
 
+# ServerAliveCountMax обов`язковий разом з Interval: ConnectTimeout покриває лише
+# встановлення TCP-з`єднання, а не мовчання вже відкритої сесії. Без цієї пари
+# запуск за розкладом може зависнути на першому ж виклику і провисіти до
+# спрацювання ExecutionTimeLimit. Тепер будь-яке зависання вмирає за ~90 с.
 $SshOpts = @('-p', $VpsPort, '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=15',
-             '-o', 'ServerAliveInterval=30')
+             '-o', 'ServerAliveInterval=30', '-o', 'ServerAliveCountMax=3')
 # -p обов`язковий: дата в назві відео береться з mtime файлу. Без нього mtime
 # став би часом копіювання, і запис, залитий за logon-тригером наступного ранку,
 # отримав би дату наступного дня.
 $ScpOpts = @('-P', $VpsPort, '-p', '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=15',
-             '-o', 'ServerAliveInterval=30', '-q')
+             '-o', 'ServerAliveInterval=30', '-o', 'ServerAliveCountMax=3', '-q')
 
 # --- логування ---------------------------------------------------------------
 New-Item -ItemType Directory -Force -Path $LogDir | Out-Null
