@@ -1,0 +1,13 @@
+# crontab користувача (crontab -e), не root.
+#
+# @reboot піднімає Ollama: вона встановлена в user-space (~/.local), бо на
+# багатьох VPS немає sudo без пароля. systemd --user тут не годиться — без
+# loginctl enable-linger (а це root) користувацькі юніти помирають при виході.
+# Звичайний @reboot у crontab працює без жодних привілеїв.
+@reboot sleep 30 && setsid nohup /home/user/lectures/bin/ollama-serve.sh >> /home/user/lectures/logs/ollama.log 2>&1 < /dev/null
+
+# Страховка на випадок, якщо push відбувся, а SSH-тригер не дійшов.
+# Запуск дешевий: без нових файлів скрипт одразу виходить. Паралельні запуски
+# виключені через flock всередині process.py.
+# Тут же відбувається прибирання архіву — тому воно працює й у дні без записів.
+*/30 * * * * /home/user/lectures/bin/run.sh >> /home/user/lectures/logs/run.log 2>&1

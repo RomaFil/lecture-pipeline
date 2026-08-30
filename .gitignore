@@ -1,0 +1,34 @@
+# --- секрети: НІКОЛИ не комітити -------------------------------------------
+secrets/
+*.token
+token.json
+client_secret.json
+*.env
+!config.example.env
+config.ps1
+
+# --- стан і дані під час роботи ---------------------------------------------
+state.db
+playlists.json
+logs/
+archive/
+incoming/
+outgoing/
+work/
+_needs-review/
+*.log
+
+# --- python -----------------------------------------------------------------
+__pycache__/
+*.py[cod]
+venv/
+.venv/
+
+# --- сміття ОС і редакторів --------------------------------------------------
+.DS_Store
+Thumbs.db
+desktop.ini
+*.bak
+*.bak-*
+.idea/
+.vscode/

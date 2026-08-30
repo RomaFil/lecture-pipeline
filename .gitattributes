@@ -1,0 +1,9 @@
+# Репозиторій редагується на Windows, а виконується на Linux.
+# Без цього git підставив би CRLF, і shell-скрипти на сервері впали б
+# з «bad interpreter: /bin/bash^M». Тримаємо LF примусово.
+* text=auto eol=lf
+
+*.ps1 text eol=crlf
+*.sh  text eol=lf
+*.py  text eol=lf
+*.md  text eol=lf

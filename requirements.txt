@@ -1,0 +1,10 @@
+# Ставити у venv на VPS: python3 -m venv venv && venv/bin/pip install -r requirements.txt
+#
+# ctranslate2 тягнеться разом із faster-whisper; окремо його закріплювати не треба.
+# Версії не прибиті навмисно: проєкт розрахований на свіжі релізи, а faster-whisper
+# і google-api-python-client ламають сумісність рідко.
+
+faster-whisper>=1.2
+google-api-python-client>=2.190
+google-auth-oauthlib>=1.2
+requests>=2.32
