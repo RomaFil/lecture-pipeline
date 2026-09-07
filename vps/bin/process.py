@@ -23,6 +23,7 @@ import sqlite3
 import subprocess
 import sys
 import time
+import warnings
 from datetime import datetime
 from pathlib import Path
 
@@ -48,8 +49,38 @@ SETTLE_SECONDS = 60
 RETENTION_DAYS = int(os.getenv("LECTURE_RETENTION_DAYS", "7"))
 # ліміт YouTube для неверифікованих каналів
 LONG_VIDEO_SECONDS = 15 * 60
+# Жорсткий ліміт заголовка YouTube. Продубльований тут навмисно: yt_upload ріже
+# title[:100] з ХВОСТА, а в хвості у нас дата — тобто мовчазне обрізання забирало б
+# саме те, за чим запис потім шукають. Тому вкорочуємо тему, а не заголовок.
+TITLE_MAX = 100
+# Права на відео, що приїжджають з Windows. `scp -p` зберігає режим ДЖЕРЕЛА,
+# а Windows віддає 0666 — тобто записи лягали на VPS доступними на запис усім
+# у системі. Аудит безпеки за серпень 2026 окремо засвідчив, що файлів зі
+# світовим записом у домашній теці немає; конвеєр це тихо порушив.
+# Прибрати `-p` не можна: разом із режимом він переносить mtime, а mtime — це
+# дата запису лекції, з якої будується вся назва.
+VIDEO_MODE = 0o640
+# Тип заняття в назві. Лекція — випадок за замовчуванням і мітки не отримує:
+# інакше 90 % записів носили б однакове зайве слово.
+# Мітка йде В ДУЖКИ поруч із датою, а не префіксом «Практика: » перед темою, бо
+# safe_name() вирізає двокрапку як заборонений у Windows символ — префікс
+# перетворювався б на «Практика тема». Знайдено тестом, не здогадкою.
+KIND_LABEL = {"практика": "практика", "лабораторна": "лабораторна"}
 
 sys.path.insert(0, str(BASE / "bin"))
+
+# google.api_core на кожному імпорті попереджає, що Python 3.10 (наш у venv)
+# перестане підтримуватись 04.10.2026. Факт справжній і записаний у нотатці
+# конвеєра — але оскільки yt_upload тепер імпортується на рівні модуля, це
+# попередження друкувалось би в run.log на КОЖНОМУ прогоні cron, тобто ~96
+# рядків на добу навіть у дні без записів. Попередження, яке повторюється
+# 48 разів на день, читати перестають — а разом із ним і решту лога.
+warnings.filterwarnings("ignore", category=FutureWarning,
+                        module=r"google\.api_core.*")
+
+# Імпорт саме тут, після sys.path: yt_upload потрібен на рівні модуля, щоб main()
+# міг спіймати yt_upload.QuotaExceeded окремо від решти помилок.
+import yt_upload  # noqa: E402
 
 for d in (INCOMING, OUTGOING, WORK, ARCHIVE, REVIEW, LOGS):
     d.mkdir(parents=True, exist_ok=True)
@@ -142,6 +173,30 @@ def safe_name(s: str) -> str:
     return re.sub(r"\s+", " ", s).strip()
 
 
+def make_title(subject: str, topic: str, kind: str, rec_date: datetime) -> str:
+    """`<Дисципліна> — <Тема> ([тип, ]ДД.ММ.РРРР)`, гарантовано ≤ TITLE_MAX.
+
+    Дата обов'язково доживає до кінця: якщо все разом не влазить у ліміт
+    YouTube, ріжеться ТЕМА, а не заголовок з хвоста. Найдовша дисципліна
+    (CISCO, 50 символів) плюс тема на дозволені схемою 70 давали 136 символів —
+    тобто дату зрізало ще до появи міток типу, просто цього ніхто не бачив.
+    """
+    label = KIND_LABEL.get(kind, "")
+    date = rec_date.strftime("%d.%m.%Y")
+    suffix = f" ({label}, {date})" if label else f" ({date})"
+    head = f"{subject} — "
+    room = TITLE_MAX - len(head) - len(suffix)
+    if room < 10:
+        # Дисципліна аномально довга — ріжемо вже її, аби вціліли тип і дата.
+        head = head[:TITLE_MAX - len(suffix) - 10]
+        room = 10
+    if len(topic) > room:
+        # -1 під саме троєкрапку: без цього результат виходив на символ довшим
+        # за ліміт, і YouTube зрізав би хвіст із датою.
+        topic = topic[:room - 1].rstrip(" .,;:-—") + "…"
+    return safe_name(head + topic + suffix)
+
+
 def write_transcript(dest: Path, title: str, meta: dict, body: str):
     dest.parent.mkdir(parents=True, exist_ok=True)
     front = "\n".join(f"{k}: {v}" for k, v in meta.items())
@@ -149,6 +204,23 @@ def write_transcript(dest: Path, title: str, meta: dict, body: str):
 
 
 # -------------------------------------------------------------------- pipeline
+
+def harden_modes():
+    """Знімає світовий доступ із файлів, що приїхали з Windows.
+
+    Ідемпотентна: 0640 світових бітів не має, тож повторні прогони мовчать.
+    Робиться на початку кожного запуску, а не лише при обробці — інакше файл,
+    який чекає в черзі години, весь цей час лежить доступним на запис.
+    """
+    for d in (INCOMING, ARCHIVE, REVIEW):
+        for p in d.glob("*"):
+            try:
+                if p.is_file() and (p.stat().st_mode & 0o007):
+                    p.chmod(VIDEO_MODE)
+                    log.info("права: %s → %o", p.name, VIDEO_MODE)
+            except OSError as e:  # noqa: BLE001
+                log.warning("права: не вдалося змінити %s: %s", p.name, e)
+
 
 def candidates() -> list[Path]:
     now = time.time()
@@ -165,12 +237,14 @@ def candidates() -> list[Path]:
 
 def process_one(db, video: Path):
     sha = sha256_of(video)
-    row = db.execute("SELECT status, attempts FROM files WHERE sha256=?", (sha,)).fetchone()
+    row = db.execute(
+        "SELECT status, attempts, video_id FROM files WHERE sha256=?", (sha,)).fetchone()
     if row and row[0] in ("done", "needs_review"):
         log.warning("%s: вже оброблений (%s), видаляю дублікат з incoming", video.name, row[0])
         video.unlink()
         return
     attempts = row[1] if row else 0
+    prior_video_id = row[2] if row else None
     if attempts >= MAX_ATTEMPTS:
         log.error("%s: вичерпані спроби (%d), пропускаю", video.name, attempts)
         return
@@ -228,14 +302,12 @@ def process_one(db, video: Path):
                     video.name, res["reason"])
         return
 
-    title = safe_name(f"{res['subject']} — {res['topic']} ({rec_date.strftime('%d.%m.%Y')})")
-    log.info("title: %s", title)
+    title = make_title(res["subject"], res["topic"], res["kind"], rec_date)
+    log.info("title: %s (тип: %s)", title, res["kind"])
     set_status(db, sha, "classified", subject=res["subject"], slug=res["slug"],
                topic=res["topic"], title=title)
 
     # 4. YouTube (unlisted)
-    import yt_upload
-
     # Запобіжник: без верифікації каналу YouTube мовчки відхилить усе довше за
     # 15 хвилин — уже ПІСЛЯ того, як прийме файл. Краще не заливати взагалі,
     # ніж спалити квоту й отримати відмову заднім числом.
@@ -254,8 +326,22 @@ def process_one(db, video: Path):
         f"Дата: {rec_date.strftime('%d.%m.%Y %H:%M')}\n\n"
         "Особистий архів. Доступ лише за прямим посиланням."
     )
-    video_id = yt_upload.upload(video, title, description)
-    log.info("YouTube: завантажено id=%s", video_id)
+    # Повторна спроба після `upload_unverified` НЕ має заливати відео вдруге:
+    # файл уже на YouTube, а друга заливка коштує ще 1600 одиниць квоти (з 10 000
+    # на добу) і лишає дубль на каналі. Спершу питаємо про старий id — це 1 одиниця.
+    video_id = None
+    if prior_video_id:
+        ok, info = yt_upload.verify(prior_video_id)
+        if ok:
+            video_id = prior_video_id
+            log.info("YouTube: відео вже залите раніше (id=%s), повторної заливки немає",
+                     video_id)
+        else:
+            log.warning("YouTube: попереднє відео %s не підтверджується (%s) — заливаю наново",
+                        prior_video_id, info.get("uploadStatus") or info.get("error"))
+    if video_id is None:
+        video_id = yt_upload.upload(video, title, description)
+        log.info("YouTube: завантажено id=%s", video_id)
 
     # 5. підтвердження ПЕРЕД видаленням — сам факт «команда не впала» не рахується
     ok, info = yt_upload.verify(video_id)
@@ -278,8 +364,14 @@ def process_one(db, video: Path):
     except Exception as e:  # noqa: BLE001
         log.warning("не вдалося додати в плейліст (відео на місці, це не критично): %s", e)
 
-    # 7. транскрипт у outgoing
-    dest = OUTGOING / res["slug"] / f"{title}.md"
+    # 7. транскрипт у outgoing.
+    # Час запису в імені файлу обов'язковий: `title` містить лише дату, і два
+    # заняття з однієї дисципліни в один день (пара + практика, або здвоєна
+    # лекція) з однаковою темою дали б однакове ім'я — а write_transcript
+    # мовчки перезаписав би перший транскрипт. Перевіряти колізію по наявності
+    # файлу не можна: перший міг уже поїхати на ПК і зникнути з outgoing.
+    # Час у назву, а не в `title`: заголовок на YouTube лишається чистим.
+    dest = OUTGOING / res["slug"] / f"{title} [{rec_date.strftime('%H-%M')}].md"
     write_transcript(dest, title, {
         "дисципліна": res["subject"],
         "тип": res["kind"],
@@ -322,7 +414,6 @@ def purge_archive(db):
     if not files:
         return
 
-    import yt_upload
     log.info("архів: %d файл(ів) старші за %d дн., перевіряю стан на YouTube",
              len(files), RETENTION_DAYS)
     for p in files:
@@ -336,6 +427,9 @@ def purge_archive(db):
         sha, video_id, title = row
         try:
             ok, info = yt_upload.check_processed(video_id)
+        except yt_upload.QuotaExceeded:
+            # Далі по списку буде те саме — припиняємо, а не довбимо вичерпану квоту.
+            raise
         except Exception as e:  # noqa: BLE001
             log.warning("архів: %s — не вдалося перевірити (%s), лишаю файл", p.name, e)
             continue
@@ -361,6 +455,13 @@ def main():
 
     db = open_db()
 
+    # Гігієна прав робиться першою і завжди: файл, що чекає в черзі, не має
+    # години лежати доступним на запис усім у системі.
+    try:
+        harden_modes()
+    except Exception as e:  # noqa: BLE001
+        log.warning("не вдалося вирівняти права (не критично): %s", e)
+
     # Прибирання архіву робиться щоразу, навіть коли нових записів немає —
     # інакше воно ніколи б не спрацювало у «тихі» дні.
     try:
@@ -375,9 +476,26 @@ def main():
     log.info("до обробки: %d файл(ів)", len(files))
 
     failed = 0
+    quota_hit = False
     for video in files:
         try:
             process_one(db, video)
+        except yt_upload.QuotaExceeded as e:
+            # Вичерпана квота — не провина файлу, тому спробу ВІДКОЧУЄМО. Інакше
+            # три прогони cron поспіль вичерпали б MAX_ATTEMPTS, і запис назавжди
+            # лишився б із «вичерпані спроби, пропускаю» — при тому що квота
+            # відновлюється сама (опівночі за Тихоокеанським = 10:00 за Києвом).
+            # Решту черги теж не чіпаємо: їй впаде рівно та сама помилка.
+            try:
+                db.execute("UPDATE files SET attempts=attempts-1 WHERE sha256=?",
+                           (sha256_of(video),))
+                db.commit()
+            except Exception:  # noqa: BLE001
+                pass
+            quota_hit = True
+            log.error("КВОТА YouTube вичерпана на %s: %s. Обробка зупинена, черга "
+                      "дочекається відновлення квоти (~10:00 за Києвом).", video.name, e)
+            break
         except Exception as e:  # noqa: BLE001 — один поганий файл не має валити решту
             failed += 1
             log.exception("%s: ПОМИЛКА: %s", video.name, e)
@@ -387,8 +505,9 @@ def main():
                 pass
             for leftover in WORK.glob("*.wav"):
                 leftover.unlink(missing_ok=True)
-    log.info("підсумок: успішно %d, з помилками %d", len(files) - failed, failed)
-    return 1 if failed else 0
+    log.info("підсумок: успішно %d, з помилками %d%s", len(files) - failed, failed,
+             ", зупинено через квоту" if quota_hit else "")
+    return 1 if (failed or quota_hit) else 0
 
 
 if __name__ == "__main__":

@@ -37,6 +37,37 @@ SCOPES = ["https://www.googleapis.com/auth/youtube.upload",
 TITLE_MAX = 100      # жорсткий ліміт YouTube
 DESC_MAX = 5000
 RETRIABLE = (500, 502, 503, 504)
+# Вичерпана квота НЕ входить у RETRIABLE навмисно: повторювати її в межах доби
+# безглуздо, вона відновлюється сама опівночі за Тихоокеанським (10:00 за Києвом).
+QUOTA_REASONS = ("quotaExceeded", "rateLimitExceeded", "userRateLimitExceeded")
+
+
+class QuotaExceeded(RuntimeError):
+    """Денна квота YouTube Data API вичерпана.
+
+    Окремий тип, а не звичайний RuntimeError, бо це НЕ провина конкретного
+    файлу: конвеєр мусить відкотити спробу й дочекатись відновлення квоти,
+    а не спалити MAX_ATTEMPTS на трьох прогонах поспіль і забути про запис.
+    """
+
+
+def _is_quota(e: HttpError) -> bool:
+    if e.resp.status not in (403, 429):
+        return False
+    body = getattr(e, "content", b"") or b""
+    if isinstance(body, bytes):
+        body = body.decode("utf-8", "replace")
+    return any(r in body for r in QUOTA_REASONS)
+
+
+def _run(request):
+    """Виконує запит API, відокремлюючи вичерпану квоту від решти помилок."""
+    try:
+        return request.execute()
+    except HttpError as e:
+        if _is_quota(e):
+            raise QuotaExceeded(f"квота YouTube Data API вичерпана: {e}") from e
+        raise
 
 
 def service():
@@ -94,6 +125,10 @@ def upload(path: Path, title: str, description: str) -> str:
         try:
             _, response = request.next_chunk()
         except HttpError as e:
+            # Квоту перевіряємо ПЕРШОЮ: 403 не входить у RETRIABLE, тож без цього
+            # вона летіла б нагору звичайним HttpError і коштувала б спроби.
+            if _is_quota(e):
+                raise QuotaExceeded(f"квота вичерпана під час заливки: {e}") from e
             if e.resp.status in RETRIABLE:
                 error = e
             else:
@@ -121,7 +156,7 @@ def long_uploads_allowed() -> tuple[bool, str]:
     цими двома станами 30.08.2026 коштувала втраченої 72-хвилинної лекції:
     заливка пройшла, а YouTube відхилив її вже після видалення файлу з VPS.
     """
-    items = service().channels().list(part="status", mine=True).execute().get("items", [])
+    items = _run(service().channels().list(part="status", mine=True)).get("items", [])
     if not items:
         return False, "канал не знайдено"
     status = items[0]["status"].get("longUploadsStatus", "невідомо")
@@ -145,7 +180,7 @@ def verify(video_id: str) -> tuple[bool, dict]:
     Відео видаляється з VPS лише після True — «команда відпрацювала без помилки»
     підтвердженням не вважається.
     """
-    items = service().videos().list(part="status,snippet", id=video_id).execute().get("items", [])
+    items = _run(service().videos().list(part="status,snippet", id=video_id)).get("items", [])
     if not items:
         return False, {"error": "відео з таким id не знайдено"}
     status = items[0]["status"]
@@ -172,7 +207,7 @@ if __name__ == "__main__":
     elif cmd == "quota":
         # дешева перевірка, що токен живий (1 одиниця квоти)
         svc = service()
-        ch = svc.channels().list(part="snippet", mine=True).execute()
+        ch = _run(svc.channels().list(part="snippet", mine=True))
         print(json.dumps({"channel": ch["items"][0]["snippet"]["title"]},
                          ensure_ascii=False))
     else:
