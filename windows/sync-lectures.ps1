@@ -96,7 +96,7 @@ function Invoke-Push {
         try {
             $sizeMb = [math]::Round($f.Length / 1MB, 1)
             Write-Log INFO ('push: {0} ({1} МБ) →' -f $f.Name, $sizeMb)
-            $localHash = (Get-FileHash -Path $f.FullName -Algorithm SHA256).Hash.ToLower()
+            $localHash = (Get-FileHash -LiteralPath $f.FullName -Algorithm SHA256).Hash.ToLower()
 
             $tmp   = "$RemoteBase/incoming/$($f.Name).uploading"
             $final = "$RemoteBase/incoming/$($f.Name)"
@@ -114,7 +114,7 @@ function Invoke-Push {
             if ($mv.ExitCode -ne 0) { throw "не вдалося перейменувати на VPS: $($mv.Output)" }
 
             # тільки тепер, після підтвердженого збігу чек-сум, прибираємо локальну копію
-            Remove-Item -Path $f.FullName -Force
+            Remove-Item -LiteralPath $f.FullName -Force
             Write-Log INFO ('push: {0} ПІДТВЕРДЖЕНО (sha {1}), локальну копію видалено' -f $f.Name, $localHash.Substring(0, 12))
             $script:Pushed++
             $any = $true
@@ -149,7 +149,7 @@ function Invoke-Pull {
             $remote = "$RemoteBase/outgoing/$p"
             # <предмет>/<назва>.md
             $localPath = Join-Path $VaultRaw ($p -replace '/', '\')
-            New-Item -ItemType Directory -Force -Path (Split-Path $localPath -Parent) | Out-Null
+            [void][System.IO.Directory]::CreateDirectory((Split-Path $localPath -Parent))
 
             $remoteHash = Get-RemoteHash $remote
             if (-not $remoteHash) { throw 'не вдалося порахувати sha256 на VPS' }
@@ -157,9 +157,20 @@ function Invoke-Pull {
             & scp @ScpOpts "${VpsHost}:$remote" $localPath
             if ($LASTEXITCODE -ne 0) { throw "scp завершився з кодом $LASTEXITCODE" }
 
-            $localHash = (Get-FileHash -Path $localPath -Algorithm SHA256).Hash.ToLower()
+            # -LiteralPath, а не -Path, і це не косметика. Ім'я транскрипту з 07.09.2026
+            # несе час запису у квадратних дужках — `[14-54]`. Для -Path це не текст,
+            # а wildcard-клас символів PowerShell: збігів нема, Get-FileHash повертає
+            # $null, і `.Hash` падає з «You cannot call a method on a null-valued
+            # expression». Файл при цьому вже успішно скачаний і цілий — ламається
+            # рівно верифікація, тобто транскрипт не видаляється з VPS, не потрапляє
+            # в wiki_log, а сторож щошість годин звинувачує ПК у тому, що той спав.
+            # Так було з практикою матаналізу 08.09: три прогони поспіль, один і той
+            # самий ERROR. Скрізь, де шлях приходить з імені файлу, — тільки
+            # -LiteralPath (у New-Item такого параметра немає взагалі, тому там
+            # .NET-виклик).
+            $localHash = (Get-FileHash -LiteralPath $localPath -Algorithm SHA256).Hash.ToLower()
             if ($localHash -ne $remoteHash) {
-                Remove-Item -Path $localPath -Force -ErrorAction SilentlyContinue
+                Remove-Item -LiteralPath $localPath -Force -ErrorAction SilentlyContinue
                 throw 'SHA256 не збігається — локальну копію видалено, на VPS залишено'
             }
 

@@ -49,6 +49,22 @@ SETTLE_SECONDS = 60
 RETENTION_DAYS = int(os.getenv("LECTURE_RETENTION_DAYS", "7"))
 # ліміт YouTube для неверифікованих каналів
 LONG_VIDEO_SECONDS = 15 * 60
+# Стеля тривалості запису — груба, і навмисно.
+#
+# Заміряний факт: аяксівське стажування 08.09.2026 йшло 3 год 28 хв (заявлені
+# 17:00-20:00 плюс перебір), здвоєна лекція ОТК у четвер — 3,5 год. Тобто штатне
+# заняття цілком доходить до 3,5 год, і стеля мусить лежати помітно вище, інакше
+# вона почне вбивати справжні записи. П'ять годин — це запас у півтори години.
+#
+# Чесно про цінність: як фільтр «це не заняття» стеля слабка — випадкове стороннє
+# відео зазвичай коротше за 5 год і крізь неї пройде. Справжній захист від чужого
+# запису — закритий список дисциплін у classify.py, який відправить незнайоме в
+# _needs-review. Стеля ловить інший клас відмови: багатогодинний файл, який зайняв
+# би VPS на півдоби (транскрипція йде 0,71x реального часу) і витіснив би записи
+# того ж дня. Тому вона питається ДО ffmpeg і whisper — а сам probe_duration
+# корисний ще й тим, що пише тривалість у лог до початку роботи. 09.09.2026 саме
+# цього рядка й бракувало, щоб побачити проблему одразу.
+MAX_VIDEO_SECONDS = int(os.getenv("LECTURE_MAX_SECONDS", str(5 * 3600)))
 # Жорсткий ліміт заголовка YouTube. Продубльований тут навмисно: yt_upload ріже
 # title[:100] з ХВОСТА, а в хвості у нас дата — тобто мовчазне обрізання забирало б
 # саме те, за чим запис потім шукають. Тому вкорочуємо тему, а не заголовок.
@@ -134,6 +150,40 @@ def sha256_of(path: Path) -> str:
 
 
 # ------------------------------------------------------------------ transcribe
+
+def probe_duration(video: Path) -> float:
+    """Тривалість відео в секундах через ffprobe, 0.0 якщо визначити не вдалося.
+
+    Питається ДО ffmpeg і whisper: обидва коштують години, а ffprobe читає лише
+    заголовок контейнера. Нуль повертається свідомо замість винятку — незрозумілий
+    контейнер не привід відмовляти запису в обробці, це вирішить транскрипція.
+    """
+    try:
+        r = subprocess.run(
+            ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+             "-of", "default=noprint_wrappers=1:nokey=1", str(video)],
+            capture_output=True, text=True, timeout=120,
+        )
+        return float(r.stdout.strip()) if r.returncode == 0 and r.stdout.strip() else 0.0
+    except (ValueError, OSError, subprocess.SubprocessError) as e:  # noqa: BLE001
+        log.warning("ffprobe: не вдалося визначити тривалість %s: %s", video.name, e)
+        return 0.0
+
+
+def send_to_review(db, video: Path, sha: str, rec_date: datetime, reason: str,
+                   body: str = ""):
+    """Кладе відео й пояснювальну нотатку в _needs-review. Нічого не видаляє."""
+    stamp = rec_date.strftime("%Y-%m-%d_%H-%M")
+    write_transcript(
+        REVIEW / f"{stamp}_{sha[:8]}.md",
+        f"Нерозпізнана лекція {stamp}",
+        {"дата": rec_date.strftime("%Y-%m-%d %H:%M"), "джерело": video.name,
+         "мова": LANG, "sha256": sha, "статус": "unrecognized",
+         "причина": reason},
+        body)
+    shutil.move(str(video), str(REVIEW / video.name))
+    set_status(db, sha, "needs_review", error=reason)
+
 
 def extract_wav(video: Path, wav: Path):
     subprocess.run(
@@ -260,8 +310,21 @@ def process_one(db, video: Path):
     db.execute("UPDATE files SET attempts=attempts+1 WHERE sha256=?", (sha,))
     db.commit()
 
-    log.info("=== %s (%.1f МБ, sha %s) ===", video.name, st.st_size / 1e6, sha[:12])
     rec_date = datetime.fromtimestamp(st.st_mtime)
+    duration = probe_duration(video)
+    log.info("=== %s (%.1f МБ, %s, sha %s) ===", video.name, st.st_size / 1e6,
+             f"{duration/3600:.2f} год" if duration else "тривалість невідома", sha[:12])
+
+    # 0. запобіжник на тривалість — ДО ffmpeg і whisper, бо саме вони коштують години.
+    # 08.09.2026 у watch-теку випадково потрапив тригодинний запис стажування Ajax:
+    # конвеєр чесно взяв його в роботу і на пів дня зайняв VPS. Заняття тепер у
+    # списку дисциплін, але сам клас відмови лишається — тому стеля явна.
+    if duration and duration > MAX_VIDEO_SECONDS:
+        reason = (f"тривалість {duration/3600:.1f} год перевищує стелю "
+                  f"{MAX_VIDEO_SECONDS/3600:.1f} год — це не схоже на заняття")
+        send_to_review(db, video, sha, rec_date, reason)
+        log.warning("%s: ЗАДОВГЕ (%s) → _needs-review, не транскрибується", video.name, reason)
+        return
 
     # 1. аудіо
     wav = WORK / (sha[:12] + ".wav")
@@ -288,16 +351,7 @@ def process_one(db, video: Path):
 
     if not res["ok"]:
         # unrecognized — нічого не вгадуємо, нічого не видаляємо, нічого не аплоадимо
-        stamp = rec_date.strftime("%Y-%m-%d_%H-%M")
-        write_transcript(
-            REVIEW / f"{stamp}_{sha[:8]}.md",
-            f"Нерозпізнана лекція {stamp}",
-            {"дата": rec_date.strftime("%Y-%m-%d %H:%M"), "джерело": video.name,
-             "мова": LANG, "sha256": sha, "статус": "unrecognized",
-             "причина": res["reason"]},
-            stamped)
-        shutil.move(str(video), str(REVIEW / video.name))
-        set_status(db, sha, "needs_review", error=res["reason"])
+        send_to_review(db, video, sha, rec_date, res["reason"], stamped)
         log.warning("%s: UNRECOGNIZED (%s) → _needs-review, відео збережено, на YouTube НЕ залито",
                     video.name, res["reason"])
         return

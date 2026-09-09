@@ -89,7 +89,11 @@ reset; rec 1; H=21 D=5 run "ПТ, 1 з 1 — мовчить" SILENT no_recording
 reset; rec 1; H=21 D=6 run "СБ, 1 з 2 — кричить (недобір)" FIRE no_recording
 reset; rec 2; H=21 D=6 run "СБ, 2 з 2 — мовчить" SILENT no_recording
 reset;        H=21 D=1 run "ПН — не день пар, мовчить" SILENT no_recording
-reset;        H=21 D=3 run "СР — не день пар, мовчить" SILENT no_recording
+# СР перестала бути порожнім днем 09.09.2026: бокс переїхав із спортзалу 24 в
+# онлайн і тепер пишеться. Кейс не видалений, а перевернутий — саме він упав
+# першим прогоном після правки LECTURE_SCHEDULE, і це правильна поведінка тесту.
+reset; rec 1; H=21 D=3 run "СР, 1 з 1 (бокс) — мовчить" SILENT no_recording
+reset;        H=21 D=3 run "СР, 0 з 1 (бокс) — кричить" FIRE no_recording
 reset;        H=21 D=7 run "НД — не день пар, мовчить" SILENT no_recording
 reset; rec 4; H=19 D=4 run "ЧТ 19:00 — ще рано, мовчить" SILENT no_recording
 
