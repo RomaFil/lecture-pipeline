@@ -16,7 +16,12 @@ SRC="${1:-$HOME/lectures/bin/alert.sh}"
 T="$HOME/alerttest"
 rm -rf "$T"
 mkdir -p "$T/incoming" "$T/outgoing" "$T/archive" "$T/_needs-review" \
-         "$T/logs" "$T/state/alerts" "$T/bin" "$T/shim"
+         "$T/logs" "$T/state/alerts" "$T/bin" "$T/shim" "$T/backups"
+
+# Перевірка 12 дивиться на теку бекапів сховища. Показуємо їй пісочницю, а не
+# /var/backups: інакше тест залежав би від того, що саме зараз лежить на VPS,
+# і кейс "здоровий стан" міг би падати через справжній стан бекапів.
+export LECTURE_BACKUP_DIR="$T/backups"
 
 printf '%s\n' '#!/bin/bash' \
   'echo "FIRED: $(echo "$1" | head -1)" >> "$HOME/alerttest/fired.log"' > "$T/bin/notify.sh"
@@ -45,11 +50,25 @@ mkpc() {
     "pending_oldest_h=0" "pending_names=" "recordings_today=0" \
     "task_timeouts_24h=0" "on_ac=1" "battery_pct=90" > "$T/state/pc-status.env"
 }
+# bk <скільки> <same|vary> [годин_тому_для_найсвіжішого]
+# Підробляє теку бекапів: N архівів однакового або різного розміру. Розмір
+# задається реальними байтами — перевірка 12 читає саме stat -c %s.
+bk() {
+  local n="$1" mode="${2:-vary}" age_h="${3:-1}" i sz f
+  mkdir -p "$T/backups"; rm -f "$T/backups"/*.tar.gz 2>/dev/null
+  for i in $(seq 1 "$n"); do
+    if [ "$mode" = "same" ]; then sz=1000; else sz=$(( 1000 + i * 7 )); fi
+    f="$T/backups/obsidian_day$(printf %02d "$i").tar.gz"
+    head -c "$sz" /dev/zero > "$f"
+    touch -d "-$(( age_h + n - i )) hours" "$f"
+  done
+}
 reset() {
   rm -rf "$T/incoming"/* "$T/outgoing"/* "$T/archive"/* "$T/_needs-review"/* \
          "$T/state/alerts"/* "$T/fired.log" 2>/dev/null
   : > "$T/logs/process.log"
   mkpc
+  bk 6 vary 1
 }
 old() { touch -d "$1" "$2"; }
 # rec N — N сьогоднішніх відео в archive (стан "оброблено")
@@ -167,6 +186,17 @@ reset; sed -i -e 's/^on_ac=.*/on_ac=0/' -e 's/^battery_pct=.*/battery_pct=20/' "
                                            H=21 D=3 run "10. батарея перед ніччю" FIRE pc_battery
 reset; sed -i -e 's/^on_ac=.*/on_ac=0/' -e 's/^battery_pct=.*/battery_pct=20/' "$T/state/pc-status.env"
                                            H=12 D=3 run "10. батарея вдень — мовчить" SILENT pc_battery
+
+echo "=== перевірка 12: бекап сховища ==="
+reset; bk 6 vary 1;   H=12 D=3 run "12. архіви свіжі й різні — мовчить" SILENT backup_stale
+reset; bk 5 same 1;   H=12 D=3 run "12. 5 однакових розмірів — кричить" FIRE backup_stale
+reset; bk 4 same 1;   H=12 D=3 run "12. 4 однакових — ще в межах норми" SILENT backup_stale
+reset; bk 6 vary 48;  H=12 D=3 run "12. найсвіжіший архів 48 год тому — кричить" FIRE backup_stale
+reset; bk 5 same 1;   H=12 D=3 run "12. готуємо штамп" FIRE backup_stale
+bk 6 vary 1;          H=12 D=3 run "12. джерело ожило — штамп знято" SILENT backup_stale
+reset; rm -rf "$T/backups"
+                      H=12 D=3 run "12. теки бекапів немає — мовчить, це не збій" SILENT backup_stale
+mkdir -p "$T/backups"
 
 echo "=== здоровий стан ==="
 reset
