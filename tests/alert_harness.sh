@@ -133,6 +133,25 @@ else fail=$((fail+1)); echo "  FAIL 4. база зіпсована: [$cnt]"; fi
 /bin/date >> "$T/logs/process.log"
 sed -i '$ s/$/ ERROR тест/' "$T/logs/process.log"
                                            H=12 D=3 run "4. новий ERROR" FIRE process_error
+# Штамп має зникнути на першому ж спокійному прогоні — інакше наступна помилка
+# в межах кулдауну (6 год) буде мовчки з'їдена. Саме це й сталося 09.09.2026.
+                                           H=12 D=3 run "4. штамп знято, коли нових ERROR немає" SILENT process_error
+/bin/date >> "$T/logs/process.log"
+sed -i '$ s/$/ ERROR друга помилка/' "$T/logs/process.log"
+# Тут `run` не годиться: він дивиться лише на наявність штампа, а стара
+# (зламана) версія лишала штамп висіти — тобто кейс проходив би й на баговому
+# коді. Питання не "чи є штамп", а "чи справді ПОЛЕТІЛО друге повідомлення",
+# тому перевіряємо лічильник у підставному нотифікаторі.
+FAKE_HOUR=12 FAKE_DOW=3 "$T/bin/alert.sh" >/dev/null 2>&1
+sent=$(grep -c 'нові помилки обробки' "$T/fired.log" 2>/dev/null || true)
+[[ "$sent" =~ ^[0-9]+$ ]] || sent=0
+if [ "$sent" -eq 2 ]; then
+  pass=$((pass+1)); printf '  OK   %-54s %s
+' "4. друга помилка ДОЛЕТІЛА, не з'їдена кулдауном" "SENT=2"
+else
+  fail=$((fail+1)); printf '  FAIL %-54s очікував SENT=2, отримав SENT=%s
+' "4. друга помилка ДОЛЕТІЛА, не з'їдена кулдауном" "$sent"
+fi
 reset; old '-10 days' "$T/archive/z.mkv";  H=12 D=3 run "5. архів не порожніє" FIRE archive_stuck
 reset; old '-5 hours' "$T/state/pc-status.env"; H=12 D=3 run "6. ПК мовчить удень" FIRE pc_stale
 reset; old '-5 hours' "$T/state/pc-status.env"; H=3  D=3 run "6. ПК мовчить уночі — норма" SILENT pc_stale
