@@ -247,6 +247,22 @@ def make_title(subject: str, topic: str, kind: str, rec_date: datetime) -> str:
     return safe_name(head + topic + suffix)
 
 
+def transcript_name(title: str, rec_date: datetime) -> str:
+    """Ім'я файлу транскрипту: `<title> [ГГ-ХХ].md`.
+
+    Час у назві обов'язковий і не косметичний: `title` містить лише ДАТУ, тож два
+    заняття з однієї дисципліни в один день (пара + практика, здвоєна лекція) з
+    однаковою темою дали б однакове ім'я — і write_transcript мовчки перезаписав би
+    перший транскрипт. Ловити колізію наявністю файлу не можна: перший міг уже
+    поїхати на ПК і зникнути з outgoing. Час саме в імені файлу, а не в `title`, —
+    щоб заголовок на YouTube лишався чистим.
+
+    Винесено окремою функцією 09.09.2026, щоб це стало перевірюваним: правило
+    існувало з 07.09, але тесту на нього не було.
+    """
+    return f"{title} [{rec_date.strftime('%H-%M')}].md"
+
+
 def write_transcript(dest: Path, title: str, meta: dict, body: str):
     dest.parent.mkdir(parents=True, exist_ok=True)
     front = "\n".join(f"{k}: {v}" for k, v in meta.items())
@@ -425,7 +441,7 @@ def process_one(db, video: Path):
     # мовчки перезаписав би перший транскрипт. Перевіряти колізію по наявності
     # файлу не можна: перший міг уже поїхати на ПК і зникнути з outgoing.
     # Час у назву, а не в `title`: заголовок на YouTube лишається чистим.
-    dest = OUTGOING / res["slug"] / f"{title} [{rec_date.strftime('%H-%M')}].md"
+    dest = OUTGOING / res["slug"] / transcript_name(title, rec_date)
     write_transcript(dest, title, {
         "дисципліна": res["subject"],
         "тип": res["kind"],

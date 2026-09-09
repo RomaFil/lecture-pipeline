@@ -111,5 +111,75 @@ except yt_upload.QuotaExceeded:
 except HttpError:
     check("_run пропускає звичайні помилки далі", True)
 
+
+# --- ім'я транскрипту: два заняття в один день не мають злипатись ------------
+# Правило живе з 07.09.2026, але тесту не мало — а мовчазний перезапис першого
+# транскрипту це саме той збій, який ніде не видно, доки не хопишся файлу.
+n1 = process.transcript_name("Математичний аналіз. Частина 3 — ряди (08.09.2026)",
+                             datetime(2026, 9, 8, 12, 20))
+n2 = process.transcript_name("Математичний аналіз. Частина 3 — ряди (08.09.2026)",
+                             datetime(2026, 9, 8, 14, 54))
+check("однакова тема в один день дає РІЗНІ імена", n1 != n2, f"{n1} == {n2}")
+check("час у імені у форматі [ГГ-ХХ]", n1.endswith(" [12-20].md"), n1)
+check("розширення .md рівно одне", n2.count(".md") == 1, n2)
+
+# --- kind: які типи отримують мітку в назві ---------------------------------
+check("тренування мітки НЕ отримує (як лекція)",
+      process.make_title("Бокс", "робота на лапах", "тренування", D)
+      == "Бокс — робота на лапах (08.09.2026)")
+check("невідомий тип мітки не отримує",
+      process.make_title("Бокс", "робота на лапах", "невідомо", D)
+      == "Бокс — робота на лапах (08.09.2026)")
+check("KIND_LABEL знає рівно два типи", set(process.KIND_LABEL) == {"практика", "лабораторна"},
+      str(sorted(process.KIND_LABEL)))
+
+# --- стеля тривалості -------------------------------------------------------
+# Заміряні факти: аяксівське стажування 08.09.2026 — 3 год 28 хв, здвоєна ОТК —
+# 3,5 год. Стеля, опущена нижче цього, почала б їсти справжні записи.
+check("стеля вища за найдовше реальне заняття (3,5 год)",
+      process.MAX_VIDEO_SECONDS > 3.5 * 3600, str(process.MAX_VIDEO_SECONDS))
+check("стеля вища за поріг довгого відео YouTube",
+      process.MAX_VIDEO_SECONDS > process.LONG_VIDEO_SECONDS)
+
+# --- probe_duration: незрозумілий файл не має валити обробку -----------------
+_bad = Path(TMP) / "не-відео.txt"
+_bad.write_text("це не медіафайл", encoding="utf-8")
+check("probe_duration на не-медіа повертає 0.0, а не виняток",
+      process.probe_duration(_bad) == 0.0)
+check("probe_duration на відсутньому файлі повертає 0.0",
+      process.probe_duration(Path(TMP) / "нема-такого.mkv") == 0.0)
+# 0.0 означає "не знаю" і НЕ має спрацьовувати як "задовге" — інакше кожен
+# нерозпізнаний контейнер мовчки їхав би в _needs-review замість обробки.
+check("нульова тривалість не вважається перевищенням стелі",
+      not (0.0 and 0.0 > process.MAX_VIDEO_SECONDS))
+
+# --- send_to_review: нічого не втрачається ----------------------------------
+import sqlite3  # noqa: E402
+
+_db = process.open_db()
+_sha = "f" * 64
+_vid = process.INCOMING / "2026-09-08 17-02-01.mkv"
+_vid.parent.mkdir(parents=True, exist_ok=True)
+_vid.write_bytes(b"\x00" * 16)
+_now = datetime.now().isoformat(timespec="seconds")
+_db.execute("INSERT INTO files(sha256, filename, size, mtime, status, attempts, created, updated)"
+            " VALUES(?,?,?,?,?,0,?,?)",
+            (_sha, _vid.name, 16, 0, "new", _now, _now))
+_db.commit()
+process.send_to_review(_db, _vid, _sha, D, "тривалість 9.0 год перевищує стелю")
+
+check("відео переїхало в _needs-review, а не зникло",
+      (process.REVIEW / "2026-09-08 17-02-01.mkv").exists())
+check("з incoming прибрано", not _vid.exists())
+_note = process.REVIEW / f"{D.strftime('%Y-%m-%d_%H-%M')}_{_sha[:8]}.md"
+check("поруч лежить пояснювальна нотатка", _note.exists(), str(_note))
+if _note.exists():
+    _txt = _note.read_text(encoding="utf-8")
+    check("у нотатці записано причину", "перевищує стелю" in _txt)
+    check("у нотатці є ім'я джерела", "2026-09-08 17-02-01.mkv" in _txt)
+_row = _db.execute("SELECT status, error FROM files WHERE sha256=?", (_sha,)).fetchone()
+check("статус у базі — needs_review", _row and _row[0] == "needs_review", str(_row))
+check("причина збережена в базі", _row and "стелю" in (_row[1] or ""), str(_row))
+
 print(f"\nпройдено {ok}/{ok + fail}")
 sys.exit(0 if fail == 0 else 1)
