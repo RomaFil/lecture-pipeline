@@ -180,20 +180,37 @@ def verify(video_id: str) -> tuple[bool, dict]:
     Відео видаляється з VPS лише після True — «команда відпрацювала без помилки»
     підтвердженням не вважається.
     """
-    items = _run(service().videos().list(part="status,snippet", id=video_id)).get("items", [])
+    items = _run(service().videos().list(
+        part="status,snippet,contentDetails", id=video_id)).get("items", [])
     if not items:
         return False, {"error": "відео з таким id не знайдено"}
     status = items[0]["status"]
+    # Блокування за Content ID НЕ відображається ані в uploadStatus, ані в
+    # rejectionReason: відео лишається "processed" і формально бездоганним, а
+    # дивитись його не можна ніде. Єдиний слід у Data API — список заблокованих
+    # країн у contentDetails.regionRestriction. 09.09.2026 саме так і сталося:
+    # у залі під час тренування грала музика, і YouTube заблокував запис у 249
+    # країнах, тобто в усьому світі. verify() тоді повернув True, і за сім днів
+    # ретенція спокійно видалила б єдину копію з VPS.
+    #
+    # Це той самий урок, що й в інциденті 001, на наступному витку: там
+    # "uploaded" не означало успіху, тут його не означає й "processed".
+    blocked = (items[0].get("contentDetails", {})
+               .get("regionRestriction", {}).get("blocked", []))
     info = {
         "privacyStatus": status.get("privacyStatus"),
         "uploadStatus": status.get("uploadStatus"),
         "failureReason": status.get("failureReason"),
         "rejectionReason": status.get("rejectionReason"),
+        "blockedCountries": len(blocked),
         "title": items[0]["snippet"].get("title"),
     }
     ok = (info["privacyStatus"] == "unlisted"
           and info["uploadStatus"] in ("uploaded", "processed")
-          and not info["failureReason"] and not info["rejectionReason"])
+          and not info["failureReason"] and not info["rejectionReason"]
+          # Поодинокі країни в списку — це не наш випадок (ми нічого не
+          # обмежуємо самі), тож будь-яке блокування вважаємо провалом.
+          and not blocked)
     return ok, info
 
 

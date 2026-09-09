@@ -19,4 +19,9 @@ if ! curl -fsS --max-time 5 "$OLLAMA_URL/api/version" >/dev/null 2>&1; then
     done
 fi
 
-exec "$LECTURES_HOME/venv/bin/python" "$LECTURES_HOME/bin/process.py"
+# nice поверх обмеження потоків. Потоки дають ЄМНІСТЬ (одне ядро завжди вільне),
+# nice дає ПРІОРИТЕТ: навіть на своїх трьох ядрах конвеєр поступається всьому
+# інтерактивному й латентно-чутливому — крипто WireGuard, xray, докерним сервісам.
+# Коли машина вільна, ціни в цього немає: планувальник усе одно віддає весь час
+# єдиному охочому.
+exec nice -n 10 "$LECTURES_HOME/venv/bin/python" "$LECTURES_HOME/bin/process.py"

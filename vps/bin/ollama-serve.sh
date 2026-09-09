@@ -5,5 +5,8 @@ export OLLAMA_HOST=127.0.0.1:11434
 export OLLAMA_KEEP_ALIVE=0
 export OLLAMA_MAX_LOADED_MODELS=1
 export OLLAMA_NUM_PARALLEL=1
+# Ті самі три ядра, що й у whisper: класифікація триває ~2,5 хв, і зайва
+# швидкість тут нічого не варта, а вільне ядро під VPN і сервіси — варте.
+export OLLAMA_NUM_THREAD=3
 export OLLAMA_MODELS="$HOME/.ollama/models"
 exec "$HOME/.local/bin/ollama" serve
