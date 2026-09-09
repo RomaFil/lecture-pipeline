@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Дрі-ран класифікатора на фікстурах. Модель тримається в пам`яті між викликами."""
 import os
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -8,6 +9,45 @@ from pathlib import Path
 os.environ.setdefault("LECTURE_KEEP_ALIVE", "5m")
 sys.path.insert(0, str(Path(__file__).parent))
 import classify as clf  # noqa: E402
+
+
+def refuse_if_busy():
+    """Не стартувати, поки конвеєр має роботу. ЦЕ НЕ ПЕРЕСТРАХОВКА.
+
+    Тест виставляє LECTURE_KEEP_ALIVE=5m, щоб не перезавантажувати модель між
+    фікстурами, — і Ollama лишається в памʼяті на ~4,7 ГБ. На VPS із 5,9 ГБ це
+    означає, що будь-яка транскрипція, яка стартує поруч, гине від OOM-кілера.
+
+    09.09.2026 це сталося ДВІЧІ за один день, причому вдруге — вже після того,
+    як застереження було написане в нотатці конвеєра. Текстове попередження
+    виявилось недостатнім, тому перевірка живе тут, у коді: єдине, що надійно
+    зупиняє людину (чи агента), яка поспішає, — відмова стартувати.
+
+    FORCE=1 лишає лазівку для випадку, коли справді треба.
+    """
+    if os.getenv("FORCE") == "1":
+        return
+    base = Path(os.getenv("LECTURES_HOME", Path.home() / "lectures"))
+    incoming = base / "incoming"
+    pending = [p for p in incoming.glob("*") if p.is_file()] if incoming.is_dir() else []
+    busy = subprocess.run(
+        ["pgrep", "-f", str(base / "bin") + r"/(process|transcribe_worker)\.py"],
+        capture_output=True, text=True).stdout.strip()
+    if pending or busy:
+        what = []
+        if pending:
+            what.append("у incoming/ лежать записи: " + ", ".join(p.name for p in pending))
+        if busy:
+            what.append("працює обробка (pid " + busy.replace("\n", ", ") + ")")
+        print("ВІДМОВА: " + "; ".join(what), file=sys.stderr)
+        print("Тест тримає модель у памʼяті й уб'є транскрипцію OOM-кілером.",
+              file=sys.stderr)
+        print("Дочекайся порожньої черги або запусти з FORCE=1, якщо впевнений.",
+              file=sys.stderr)
+        sys.exit(3)
+
+
+refuse_if_busy()
 
 # файл → (очікуваний код дисципліни, очікуваний тип заняття)
 # НЕВІДОМО = має піти в _needs-review; kind=None = тип не перевіряємо
