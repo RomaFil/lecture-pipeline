@@ -89,7 +89,7 @@ for name, (want, want_kind) in sorted(EXPECTED.items()):
     text = (fixtures / name).read_text(encoding="utf-8")
     t0 = time.time()
     try:
-        res = clf.classify(text)
+        res = clf.classify_voted(text)
     except Exception as e:  # noqa: BLE001
         print(f"{name:24} ПОМИЛКА: {e}")
         continue

@@ -23,7 +23,6 @@ import sqlite3
 import subprocess
 import sys
 import time
-import warnings
 from datetime import datetime
 from pathlib import Path
 
@@ -39,6 +38,13 @@ LOCK_PATH = BASE / ".process.lock"
 
 WHISPER_MODEL = os.getenv("WHISPER_MODEL", "large-v3")
 LANG = os.getenv("WHISPER_LANG", "uk")
+# cpulimit -l N: N=100 означає одне ядро повністю. WHISPER_THREADS=3 і так природно
+# тримає ~300% з 400% можливих (301% середнє за семплером) — 250 обране Романом
+# 09.09.2026 як реальне послаблення пікового навантаження ціною швидкості (0,95×
+# реального часу і так близько до межі, тому нижче не ставили). cgroup CPUQuota
+# пробували раніше — контролер не делегований, межа мовчки не застосовувалась;
+# cpulimit працює через SIGSTOP/CONT у userspace й делегування не потребує.
+WHISPER_CPU_LIMIT = os.getenv("WHISPER_CPU_LIMIT", "250")
 VIDEO_EXT = {".mkv", ".mp4", ".m4v", ".mov", ".webm", ".flv"}
 MAX_ATTEMPTS = 3
 # файл, змінений щойно, може ще докачуватись — чекаємо, поки він «устоїться»
@@ -84,15 +90,6 @@ VIDEO_MODE = 0o640
 KIND_LABEL = {"практика": "практика", "лабораторна": "лабораторна"}
 
 sys.path.insert(0, str(BASE / "bin"))
-
-# google.api_core на кожному імпорті попереджає, що Python 3.10 (наш у venv)
-# перестане підтримуватись 04.10.2026. Факт справжній і записаний у нотатці
-# конвеєра — але оскільки yt_upload тепер імпортується на рівні модуля, це
-# попередження друкувалось би в run.log на КОЖНОМУ прогоні cron, тобто ~96
-# рядків на добу навіть у дні без записів. Попередження, яке повторюється
-# 48 разів на день, читати перестають — а разом із ним і решту лога.
-warnings.filterwarnings("ignore", category=FutureWarning,
-                        module=r"google\.api_core.*")
 
 # Імпорт саме тут, після sys.path: yt_upload потрібен на рівні модуля, щоб main()
 # міг спіймати yt_upload.QuotaExceeded окремо від решти помилок.
@@ -201,13 +198,25 @@ def transcribe(wav: Path) -> dict:
     out = wav.with_suffix(".json")
     log.info("whisper: %s (cpu/int8) у окремому процесі", WHISPER_MODEL)
     t0 = time.time()
+    cmd = [sys.executable, str(BASE / "bin" / "transcribe_worker.py"), str(wav), str(out)]
+    if shutil.which("cpulimit"):
+        cmd = ["cpulimit", "-l", WHISPER_CPU_LIMIT, "--"] + cmd
+    else:
+        log.warning("cpulimit не в PATH — транскрипція БЕЗ обмеження CPU "
+                    "(встанови: apt install cpulimit)")
     r = subprocess.run(
-        [sys.executable, str(BASE / "bin" / "transcribe_worker.py"), str(wav), str(out)],
-        capture_output=True, text=True,
+        cmd, capture_output=True, text=True,
         env={**os.environ, "WHISPER_MODEL": WHISPER_MODEL, "WHISPER_LANG": LANG},
     )
-    if r.returncode != 0:
-        raise RuntimeError(f"transcribe_worker впав ({r.returncode}): {r.stderr[-800:]}")
+    # Успіх перевіряємо за файлом-результатом, а не за r.returncode: перевірено
+    # 09.09.2026, cpulimit МАСКУЄ код завершення дитини (дитина exit(7) → cpulimit
+    # сам виходить 0). Той самий клас помилки, що інцидент 011 — перевіряти успіх
+    # треба за полем, яке відповідає на питання «чи впав transcribe_worker», а не
+    # за тим, яке зручно прочитати. `out` пише лише сам worker, і лише наприкінці
+    # успішного прогону — тому саме його наявність і є сигналом.
+    if not out.exists():
+        raise RuntimeError(f"transcribe_worker впав (returncode={r.returncode}, "
+                           f"ненадійний під cpulimit): {r.stderr[-800:]}")
     data = json.loads(out.read_text(encoding="utf-8"))
     out.unlink(missing_ok=True)
     log.info("whisper: %d сегментів, %.0f с аудіо, мова=%s (p=%.2f), витрачено %.0f с",
@@ -360,9 +369,11 @@ def process_one(db, video: Path):
             f"{len(plain.strip())} символів на {tr['duration']:.0f} с аудіо")
     set_status(db, sha, "transcribed")
 
-    # 3. класифікація
+    # 3. класифікація голосуванням трьох фрагментів (09.09.2026: однофрагментний
+    # підхід давав 6/8 на справжніх записах, з confidence=high на всіх помилках —
+    # див. classify.classify_voted() і "Стан на 09.09.2026" у lecture-pipeline.md)
     import classify as clf
-    res = clf.classify(plain)
+    res = clf.classify_voted(plain)
     log.info("класифікатор: %s", json.dumps(res.get("raw", {}), ensure_ascii=False))
 
     if not res["ok"]:

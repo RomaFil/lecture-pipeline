@@ -4,6 +4,7 @@
 Локальна LLM через Ollama на 127.0.0.1. Вільної генерації назви дисципліни немає:
 модель вибирає код зі списку або повертає НЕВІДОМО — вгадувати заборонено.
 """
+import collections
 import json
 import os
 import re
@@ -160,6 +161,13 @@ def sample_text(transcript: str, max_chars: int = 5000) -> str:
     text = transcript.strip()
     if len(text) <= max_chars:
         return text
+    if len(text) <= max_chars * SAMPLE_MIN_RATIO:
+        # Трохи довший за бюджет, але недостатньо, щоб ділити мало сенс: середина
+        # опинилась би впритул до початку або перекрилась би з ним. Просте обрізання.
+        # SAMPLE_MIN_RATIO існував з появи sample_text(), але ніде не застосовувався —
+        # знайдено тестом (test_process.py), а не збоєм: 09.09.2026 усі реальні
+        # транскрипти довші за поріг, тому в бою це мовчало.
+        return _trim_tail(text[:max_chars])
 
     head_budget = max_chars // 2
     mid_budget = max_chars - head_budget - len(SAMPLE_MARKER)
@@ -185,10 +193,13 @@ FORMAT_NOTE = """
 ПРО ФОРМАТ ЦІЄЇ СТЕНОГРАМИ: заняття довге, тому подано ДВА фрагменти — початок і середина, розділені рядком у квадратних дужках. Це ОДНЕ І ТЕ САМЕ заняття, а не два різні. Початок зазвичай містить оргмоменти й вітання, середина — сам зміст. Тему визначай за змістом ОБОХ фрагментів, і надавай перевагу другому: у ньому суть заняття, а не вступ."""
 
 
-def classify(transcript: str, max_chars: int = 5000) -> dict:
-    """Повертає {"ok": True, subject, slug, kind, topic} або {"ok": False, reason}."""
-    text = sample_text(transcript, max_chars)
-    system = SYSTEM + FORMAT_NOTE if SAMPLE_MARKER in text else SYSTEM
+def _request(system: str, text: str, keep_alive: str = None) -> dict:
+    """Один запит до моделі за структурованою схемою. Повертає сирий JSON, без валідації.
+
+    keep_alive=None означає «взяти дефолт модуля» (KEEP_ALIVE, у проді "0" —
+    вивантажити одразу, RAM потрібна whisper'у). classify_voted() перекриває це
+    для проміжних запитів голосування — див. коментар там.
+    """
     r = requests.post(
         f"{OLLAMA}/api/chat",
         json={
@@ -199,7 +210,7 @@ def classify(transcript: str, max_chars: int = 5000) -> dict:
             ],
             "format": SCHEMA,
             "stream": False,
-            "keep_alive": KEEP_ALIVE,
+            "keep_alive": KEEP_ALIVE if keep_alive is None else keep_alive,
             # num_predict — страховка від зациклення малої моделі:
             # відповідь за схемою вкладається у ~80 токенів.
             "options": {"temperature": 0, "num_predict": 250,
@@ -208,12 +219,28 @@ def classify(transcript: str, max_chars: int = 5000) -> dict:
         timeout=1800,
     )
     r.raise_for_status()
-    data = json.loads(r.json()["message"]["content"])
+    return json.loads(r.json()["message"]["content"])
+
+
+def _clean_topic(raw: str) -> str:
+    topic = re.sub(r"\s+", " ", str(raw)).strip(" .,;:-—")
+    return re.sub(r'[\\/:*?"<>|]', "", topic)[:70]
+
+
+def classify(transcript: str, max_chars: int = 5000) -> dict:
+    """Повертає {"ok": True, subject, slug, kind, topic} або {"ok": False, reason}.
+
+    Один запит на весь (обрізаний) транскрипт. Основний шлях конвеєра —
+    classify_voted(); ця функція лишається як шлях для короткого транскрипту
+    (chunks() з нього й так дає один фрагмент) і як пряма перевірка одного зрізу.
+    """
+    text = sample_text(transcript, max_chars)
+    system = SYSTEM + FORMAT_NOTE if SAMPLE_MARKER in text else SYSTEM
+    data = _request(system, text)
 
     code = str(data.get("subject", UNKNOWN))
     conf = data.get("confidence", "low")
-    topic = re.sub(r"\s+", " ", str(data.get("topic", ""))).strip(" .,;:-—")
-    topic = re.sub(r'[\\/:*?"<>|]', "", topic)[:70]
+    topic = _clean_topic(data.get("topic", ""))
 
     if code not in SUBJECTS or conf != "high" or not topic:
         return {
@@ -232,6 +259,114 @@ def classify(transcript: str, max_chars: int = 5000) -> dict:
     }
 
 
+def chunks(text: str, n: int = 5000) -> list:
+    """Три фрагменти для голосування: початок, середина, кінець, по межі речення.
+
+    Текст, що вкладається в один фрагмент (n), голосування не потребує — тоді
+    повертається список з одного елемента, і classify_voted() зводить це до
+    одноразового виклику classify(). Реальні транскрипти завжди довші (найкоротший
+    запис — 44 хв, ~12 000 символів), тому в бою три фрагменти виходять завжди;
+    один фрагмент — це шлях для коротких фікстур і тестових кліпів.
+    """
+    text = text.strip()
+    if len(text) <= n:
+        return [text]
+    mid = max(0, len(text) // 2 - n // 2)
+    end = max(0, len(text) - n)
+    return [_trim_tail(text[:n]),
+            _trim_head(_trim_tail(text[mid:mid + n])),
+            _trim_head(text[end:])]
+
+
+def _tally(votes: list) -> tuple:
+    """Найчастіший голос і його кількість. При розколі (1/1/1 на трьох) count<2."""
+    win, count = collections.Counter(votes).most_common(1)[0]
+    return win, count
+
+
+def _pick_topic_index(votes: list, win: str) -> int:
+    """З фрагментів, що проголосували за переможця, обирає НЕ перший.
+
+    Перший фрагмент (початок заняття) зазвичай оргвступ, а не зміст — 09.09.2026
+    саме тому тригодинний запис про Ajax отримав тему «Презентація про компанію»
+    замість теми з решти трьох годин. Якщо серед переможних голосів є лише
+    перший — беремо його, іншого джерела теми немає.
+    """
+    winners = [i for i, v in enumerate(votes) if v == win]
+    return next((i for i in winners if i != 0), winners[-1])
+
+
+def classify_voted(transcript: str, n: int = 5000) -> dict:
+    """Класифікація голосуванням трьох фрагментів (початок / середина / кінець).
+
+    Основний шлях конвеєра з 09.09.2026 — замінює одноразовий classify() у
+    process.py. Причина: на восьми справжніх транскриптах (tests/eval.py)
+    однофрагментний підхід дав 6/8, і `confidence: high` стояло на ВСІХ чотирьох
+    помилках — гейт на впевненість не захищав узагалі ні від чого, помилка
+    мовчки їхала в чужий плейліст і чужу теку vault.
+
+    Голосування (tests/vote.py, ті самі вісім записів) дало 7/8, і восьма
+    помилка — це не мовчазний промах, а розкол голосів 1/1/1 без більшості:
+    запис іде в _needs-review, а не в чужий плейліст. Одностайність фрагментів
+    (3/3) — вперше осмислена міра впевненості, на відміну від поля `confidence`,
+    яке модель проставляє собі сама.
+
+    Ціна — три виклики моделі замість одного (~7 хв замість ~2,5 хв), що є
+    шумом на тлі 2-3-годинної транскрипції.
+
+    Модель лишається завантаженою МІЖ трьома викликами (keep_alive «30s» для
+    перших двох) і вивантажується лише після останнього (дефолт модуля —
+    у проді "0"). Без цього кожен із трьох голосів у проді (де KEEP_ALIVE="0"
+    для whisper'а) тригерив би ОКРЕМЕ завантаження 5.5 ГБ моделі — знайдено
+    09.09.2026 при розборі стрибка CPU, що просадив WireGuard: три піки
+    завантаження замість одного плюс стабільної генерації.
+    """
+    parts = chunks(transcript, n)
+    if len(parts) == 1:
+        return classify(transcript, max_chars=n)
+
+    results = [_request(SYSTEM, p, keep_alive=None if i == len(parts) - 1 else "30s")
+              for i, p in enumerate(parts)]
+    votes = [str(d.get("subject", UNKNOWN)) for d in results]
+    topics_raw = [str(d.get("topic", "")) for d in results]
+    kinds = [str(d.get("kind", "невідомо")) for d in results]
+    keywords = "; ".join(str(d.get("keywords", "")) for d in results)
+
+    win, count = _tally(votes)
+    # Форма raw навмисно сумісна з raw одноразового classify(): те саме верхньоy
+    # рівневе "subject" (код, не повна назва), "kind", "confidence" — щоб звіт
+    # test_classifier.py друкував однаково для обох шляхів, і щоб код навколо
+    # (напр. лог у process.py) не мусив розрізняти, звідки прийшов результат.
+    base_raw = {"votes": votes, "subject": win if count >= 2 else None,
+                "confidence": f"{count}/{len(parts)}", "topics": topics_raw,
+                "keywords": keywords, "results": results}
+    if count < 2 or win not in SUBJECTS:
+        return {
+            "ok": False,
+            "reason": f"голоси розійшлися: {votes}",
+            "raw": base_raw,
+        }
+
+    idx = _pick_topic_index(votes, win)
+    topic = _clean_topic(topics_raw[idx])
+    if not topic:
+        return {
+            "ok": False,
+            "reason": f"subject={win} але тема порожня (фрагмент {idx})",
+            "raw": base_raw,
+        }
+
+    full, slug = SUBJECTS[win]
+    return {
+        "ok": True,
+        "subject": full,
+        "slug": slug,
+        "kind": kinds[idx],
+        "topic": topic,
+        "raw": {**base_raw, "kind": kinds[idx], "winner_fragment": idx},
+    }
+
+
 if __name__ == "__main__":
     src = sys.stdin.read() if len(sys.argv) < 2 else open(sys.argv[1], encoding="utf-8").read()
-    print(json.dumps(classify(src), ensure_ascii=False, indent=2))
+    print(json.dumps(classify_voted(src), ensure_ascii=False, indent=2))
