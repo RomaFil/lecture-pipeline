@@ -22,8 +22,14 @@ export OLLAMA_MODELS="$HOME/.ollama/models"
 # лишається можливим — це межа самого механізму SIGSTOP/CONT, той самий
 # компроміс, що вже прийнятий для whisper.
 if command -v cpulimit >/dev/null 2>&1; then
-    cpulimit -l 250 -e llama-server -b >/dev/null 2>&1 &
-    disown
+    # Захист від дубля: якщо скрипт перезапускають вручну (як в інциденті 012)
+    # без перезавантаження VPS, попередній фоновий монітор ще живий — другий
+    # поруч не додає користі, лише плутанину при діагностиці (два -e llama-server
+    # незалежно ганяються за тим самим процесом).
+    if ! pgrep -f 'cpulimit .*-e llama-server' >/dev/null 2>&1; then
+        cpulimit -l 250 -e llama-server -b >/dev/null 2>&1 &
+        disown
+    fi
 else
     echo "cpulimit не в PATH — Ollama БЕЗ обмеження CPU (встанови: apt install cpulimit)" >&2
 fi
