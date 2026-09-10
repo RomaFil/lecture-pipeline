@@ -10,7 +10,7 @@ export OLLAMA_NUM_PARALLEL=1
 export OLLAMA_NUM_THREAD=3
 export OLLAMA_MODELS="$HOME/.ollama/models"
 
-# cpulimit -l 250: те саме значення й та сама причина, що для whisper
+# cpulimit -l 400: те саме значення й та сама причина, що для whisper (піднято 10.09.2026 разом із ним пiсля зростання VPS до 6 ядер)
 # (WHISPER_CPU_LIMIT у process.py) — інцидент 012, 09.09.2026: llama-server,
 # дочірній процес ollama serve, під час класифікації брав 370-385% із 400%
 # можливих і просідав WireGuard Романа.

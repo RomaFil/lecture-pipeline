@@ -12,7 +12,7 @@ BASE="$HOME/lectures"
 command -v cpulimit >/dev/null 2>&1 || exit 0
 pgrep -f 'cpulimit .*-e llama-server' >/dev/null 2>&1 && exit 0
 
-cpulimit -l 250 -e llama-server -b >/dev/null 2>&1 &
+cpulimit -l 400 -e llama-server -b >/dev/null 2>&1 &
 disown
 echo "$(date '+%Y-%m-%d %H:%M:%S') WARN ensure-ollama-cpulimit: монітор був мертвий, перезапущено" \
     >> "$BASE/logs/process.log"
