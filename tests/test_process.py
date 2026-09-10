@@ -257,5 +257,89 @@ check("chunks(): кожен фрагмент у межах бюджету", all(
 check("chunks(): фрагменти непорожні", all(len(p) > 100 for p in _ck),
       [len(p) for p in _ck])
 
+# --- verify()/check_processed(): рішення "чи можна це подивитися" -----------
+# Найнебезпечніша логіка в конвеєрі — саме вона мовчала в інцидентах 001
+# (uploaded != успіх) і 011 (Content ID блокує, а uploadStatus/rejectionReason
+# цього не бачать), обидва рази без жодного тесту. Фейковий service() —
+# без мережі, без моделі, чиста перевірка булевого виразу.
+class _FakeVideosList:
+    def __init__(self, items):
+        self._items = items
+
+    def execute(self):
+        return {"items": self._items}
+
+
+class _FakeVideos:
+    def __init__(self, items):
+        self._items = items
+
+    def list(self, **kw):
+        return _FakeVideosList(self._items)
+
+
+class _FakeService:
+    def __init__(self, items):
+        self._items = items
+
+    def videos(self):
+        return _FakeVideos(self._items)
+
+
+def _item(privacy="unlisted", upload_status="processed", failure=None,
+          rejection=None, blocked=None, title="тест"):
+    return {
+        "status": {"privacyStatus": privacy, "uploadStatus": upload_status,
+                   "failureReason": failure, "rejectionReason": rejection},
+        "contentDetails": {"regionRestriction": {"blocked": blocked or []}},
+        "snippet": {"title": title},
+    }
+
+
+def _verify_with(items):
+    yt_upload.service = lambda: _FakeService(items)
+    return yt_upload.verify("fakeid")
+
+
+def _check_processed_with(items):
+    yt_upload.service = lambda: _FakeService(items)
+    return yt_upload.check_processed("fakeid")
+
+
+check("verify(): чисте processed відео — ok", _verify_with([_item()])[0])
+
+_ok, _info = _verify_with([_item(blocked=["US", "GB"])])
+check("verify(): блоковане хоч в одній країні — НЕ ok (регресія 011)", not _ok)
+check("verify(): blockedCountries полічені правильно", _info["blockedCountries"] == 2,
+      str(_info["blockedCountries"]))
+
+check("verify(): одна заблокована країна теж провал (ми нічого не обмежуємо самі)",
+      not _verify_with([_item(blocked=["UA"])])[0])
+
+# uploadStatus="uploaded" достатньо для verify() (документована відмінність),
+# але НЕ для check_processed() — саме ця межа коштувала 72-хвилинної лекції
+# в інциденті 001 ("uploaded" прийняли за "успіх" і видалили файл з VPS).
+check("verify(): 'uploaded' (не processed) — усе ще ok",
+      _verify_with([_item(upload_status="uploaded")])[0])
+check("check_processed(): 'uploaded' (не processed) — НЕ ok (регресія 001)",
+      not _check_processed_with([_item(upload_status="uploaded")])[0])
+check("check_processed(): 'processed' — ok",
+      _check_processed_with([_item(upload_status="processed")])[0])
+
+check("verify(): failureReason — не ok",
+      not _verify_with([_item(failure="videoProcessingFailed")])[0])
+check("verify(): rejectionReason — не ok",
+      not _verify_with([_item(rejection="lengthLimitExceeded")])[0])
+check("verify(): privacyStatus не unlisted — не ok (гвард на неочікуваний стан)",
+      not _verify_with([_item(privacy="public")])[0])
+
+_ok, _info = _verify_with([])
+check("verify(): відео не знайдено — не ok, без винятку", not _ok)
+check("verify(): відео не знайдено — є пояснення в info", "error" in _info, str(_info))
+# yt_upload.service лишається підміненим до кінця процесу — нижче він
+# більше не викликається, а окремий процес python на кожен тест-ран
+# (`if __name__ == "__main__"`) і так не ділить стан з нічим іншим.
+
+
 print(f"\nпройдено {ok}/{ok + fail}")
 sys.exit(0 if fail == 0 else 1)
