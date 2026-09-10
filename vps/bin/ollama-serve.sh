@@ -21,17 +21,11 @@ export OLLAMA_MODELS="$HOME/.ollama/models"
 # процесу й тим, як cpulimit його помітить (внутрішній опитувальний цикл),
 # лишається можливим — це межа самого механізму SIGSTOP/CONT, той самий
 # компроміс, що вже прийнятий для whisper.
-if command -v cpulimit >/dev/null 2>&1; then
-    # Захист від дубля: якщо скрипт перезапускають вручну (як в інциденті 012)
-    # без перезавантаження VPS, попередній фоновий монітор ще живий — другий
-    # поруч не додає користі, лише плутанину при діагностиці (два -e llama-server
-    # незалежно ганяються за тим самим процесом).
-    if ! pgrep -f 'cpulimit .*-e llama-server' >/dev/null 2>&1; then
-        cpulimit -l 250 -e llama-server -b >/dev/null 2>&1 &
-        disown
-    fi
-else
+# Гейт проти дубля (при ручному рестарті, як в інциденті 012) і сам запуск
+# монітора винесені в окремий скрипт — його ж періодично викликає crontab,
+# щоб самозцілитись, якщо монітор колись упаде між перезавантаженнями VPS.
+"$HOME/lectures/bin/ensure-ollama-cpulimit.sh"
+command -v cpulimit >/dev/null 2>&1 || \
     echo "cpulimit не в PATH — Ollama БЕЗ обмеження CPU (встанови: apt install cpulimit)" >&2
-fi
 
 exec "$HOME/.local/bin/ollama" serve
