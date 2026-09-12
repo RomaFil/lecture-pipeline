@@ -93,37 +93,60 @@ if [ "$(date +%-H)" -ge "$DIGEST_HOUR" ] && [ "$last_digest" != "$today" ]; then
     PCFILE="$BASE/state/pc-status.env"
     pcval() { grep -m1 "^$1=" "$PCFILE" 2>/dev/null | cut -d= -f2- ; }
 
+    to=0; fa=0; pending=0; wake_line=""
     if [ -f "$PCFILE" ]; then
         pc_age=$(( ( $(date +%s) - $(stat -c %Y "$PCFILE") ) / 60 ))
-        pc_line="ПК: звіт $pc_age хв тому, диск $(pcval disk_free_gb)/$(pcval disk_total_gb) ГБ, у черзі $(pcval pending_count)"
+        pending=$(pcval pending_count); [[ "$pending" =~ ^[0-9]+$ ]] || pending=0
+        pc_line="ПК: звіт $pc_age хв тому, диск $(pcval disk_free_gb)/$(pcval disk_total_gb) ГБ, у черзі $pending"
+
+        # Нічне пробудження задокументовано непрацюючим апаратно (закрито
+        # 09.09.2026 — див. lecture-pipeline.md). Писати "не спрацювало (як і
+        # очікувалось)" щодня — привчати ігнорувати звіт заради очікуваного
+        # факту, який не зміниться. Мовчати в нормі, згадувати лише коли
+        # РАПТОМ спрацювало — оце й буде новина.
         nw=$(pcval night_wake_ok)
-        case "$nw" in
-            1) wake_line="Нічне пробудження о 23:00: СПРАЦЮВАЛО" ;;
-            0) wake_line="Нічне пробудження о 23:00: не спрацювало (як і очікувалось)" ;;
-            *) wake_line="Нічне пробудження о 23:00: невідомо" ;;
-        esac
+        [ "$nw" = "1" ] && wake_line="❗ Нічне пробудження о 23:00 цього разу СПРАЦЮВАЛО (документована поведінка — що воно апаратно не працює; варто перевірити, чи щось змінилось)"
+
         to=$(pcval task_timeouts_24h); fa=$(pcval task_failures_24h)
-        [ "${to:-0}" -gt 0 ] 2>/dev/null && wake_line="$wake_line
-Таймлімітів за добу: $to"
-        [ "${fa:-0}" -gt 0 ] 2>/dev/null && wake_line="$wake_line
-Невдалих запусків за добу: $fa"
+        [[ "$to" =~ ^[0-9]+$ ]] || to=0
+        [[ "$fa" =~ ^[0-9]+$ ]] || fa=0
     else
         pc_line="ПК: звіту ще немає"
-        wake_line=""
     fi
 
-    "$NOTIFY" "$(printf '%s\n' \
-        "✅ Конвеєр лекцій — добовий звіт" \
-        "" \
-        "Лекцій в обробці за добу: $done_cnt" \
-        "Черга: incoming=$n_in  outgoing=$n_out  needs-review=$n_rev  archive=$n_arch" \
-        "Диск VPS: $disk" \
-        "RAM VPS: мінімум вільної за добу ${ram_min}M" \
-        "$pc_line" \
-        "$wake_line" \
-        "" \
-        "Цей звіт приходить щодня о ${DIGEST_HOUR}:xx." \
-        "Якщо він не прийшов — щось зламалось мовчки.")" && echo "$today" > "$digest_stamp"
+    # --- "на що звернути увагу": непорожнє лише коли є реальний сигнал ---
+    # Раніше "Таймлімітів за добу: N" і "Невдалих запусків за добу: N" стояли
+    # голими числами під зеленою галочкою — щоб зрозуміти, чи це "само
+    # пройшло" чи "щось тихо загубилось", доводилось лізти в логи руками.
+    # Тепер кожна цифра одразу пояснює, що вона означає і що з нею робити.
+    attention=()
+    [ "$n_rev" -gt 0 ] && attention+=("— needs-review: $n_rev файл(ів) — класифікатор не впізнав дисципліну, розібрати вручну (~/lectures/_needs-review/)")
+    [ "$to" -gt 0 ]    && attention+=("— Таймлімітів за добу: $to — синк на ПК вбито за лімітом часу (30 хв), він сам перезапустився. У черзі на ПК зараз: $pending (0 означає, що файл таки дійшов)")
+    [ "$fa" -gt 0 ]    && attention+=("— Невдалих запусків за добу: $fa — здебільшого той самий випадок, що й таймліміт вище")
+
+    if [ "${#attention[@]}" -gt 0 ]; then
+        header="⚠️ Конвеєр лекцій — добовий звіт (є на що глянути)"
+    else
+        header="✅ Конвеєр лекцій — добовий звіт"
+    fi
+
+    lines=(
+        "$header"
+        ""
+        "Лекцій в обробці за добу: $done_cnt"
+        "Черга: incoming=$n_in  outgoing=$n_out  needs-review=$n_rev  archive=$n_arch"
+        "Диск VPS: $disk"
+        "RAM VPS: мінімум вільної за добу ${ram_min}M"
+        "$pc_line"
+    )
+    [ -n "$wake_line" ] && lines+=("$wake_line")
+    if [ "${#attention[@]}" -gt 0 ]; then
+        lines+=("" "На що звернути увагу:")
+        lines+=("${attention[@]}")
+    fi
+    lines+=("" "Цей звіт приходить щодня о ${DIGEST_HOUR}:xx." "Якщо він не прийшов — щось зламалось мовчки.")
+
+    "$NOTIFY" "$(printf '%s\n' "${lines[@]}")" && echo "$today" > "$digest_stamp"
 fi
 
 exit 0
