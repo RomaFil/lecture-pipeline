@@ -259,8 +259,31 @@ def make_title(subject: str, topic: str, kind: str, rec_date: datetime) -> str:
     return safe_name(head + topic + suffix)
 
 
+# Стеля довжини ІМЕНІ ФАЙЛУ транскрипту, в байтах UTF-8 — окремо від TITLE_MAX
+# (той рахує символи під ліміт YouTube, де кирилиця йде як 1 символ).
+# Remotely Save шифрує кожен сегмент шляху (AES-GCM + base64url), і зашифрований
+# результат виходить довшим за plaintext, а ext4 ріже ім'я файлу на 255 байтах.
+# 14.09.2026 три транскрипти з іменами 178-187 байт (TITLE_MAX=100 символів
+# кирилиці ≈ 200 байт) впали на сервері з `(36) File name too long`, поки
+# найдовший на той момент робочий — 154 байти — синкався нормально. Стеля 165 —
+# посередині: над усіма наявними іменами (не обрізає те, що й так працювало),
+# під найкоротшим зі збійних (178) з запасом.
+FILENAME_BYTE_MAX = 165
+
+
+def _truncate_utf8(s: str, max_bytes: int) -> str:
+    """Обрізає рядок до max_bytes у UTF-8, не розриваючи символ навпіл."""
+    b = s.encode("utf-8")[:max_bytes]
+    while b:
+        try:
+            return b.decode("utf-8")
+        except UnicodeDecodeError:
+            b = b[:-1]
+    return ""
+
+
 def transcript_name(title: str, rec_date: datetime) -> str:
-    """Ім'я файлу транскрипту: `<title> [ГГ-ХХ].md`.
+    """Ім'я файлу транскрипту: `<title> [ГГ-ХХ].md`, ≤ FILENAME_BYTE_MAX байт UTF-8.
 
     Час у назві обов'язковий і не косметичний: `title` містить лише ДАТУ, тож два
     заняття з однієї дисципліни в один день (пара + практика, здвоєна лекція) з
@@ -270,9 +293,17 @@ def transcript_name(title: str, rec_date: datetime) -> str:
     щоб заголовок на YouTube лишався чистим.
 
     Винесено окремою функцією 09.09.2026, щоб це стало перевірюваним: правило
-    існувало з 07.09, але тесту на нього не було.
+    існувало з 07.09, але тесту на нього не було. Обрізання за байтами додано
+    14.09.2026 — саме тут, а не в make_title/title, щоб YouTube-заголовок і
+    метадані лишались повними: коротшає лише ім'я файлу.
     """
-    return f"{title} [{rec_date.strftime('%H-%M')}].md"
+    suffix = f" [{rec_date.strftime('%H-%M')}].md"
+    budget = FILENAME_BYTE_MAX - len(suffix.encode("utf-8"))
+    name_title = title
+    if len(title.encode("utf-8")) > budget:
+        name_title = _truncate_utf8(title, budget - len("…".encode("utf-8")))
+        name_title = name_title.rstrip(" .,;:-—") + "…"
+    return f"{name_title}{suffix}"
 
 
 def write_transcript(dest: Path, title: str, meta: dict, body: str):
