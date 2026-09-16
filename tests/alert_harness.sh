@@ -23,6 +23,10 @@ mkdir -p "$T/incoming" "$T/outgoing" "$T/archive" "$T/_needs-review" \
 # і кейс "здоровий стан" міг би падати через справжній стан бекапів.
 export LECTURE_BACKUP_DIR="$T/backups"
 
+# Умови 13-14 читають лог поза $BASE (на бойовому боксі — root:root у /var/log).
+# Той самий трюк підміни, що LECTURE_BACKUP_DIR вище.
+export LECTURE_UPDATE_LOG="$T/update.log"
+
 printf '%s\n' '#!/bin/bash' \
   'echo "FIRED: $(echo "$1" | head -1)" >> "$HOME/alerttest/fired.log"' > "$T/bin/notify.sh"
 chmod +x "$T/bin/notify.sh"
@@ -63,12 +67,19 @@ bk() {
     touch -d "-$(( age_h + n - i )) hours" "$f"
   done
 }
+ulograw() { printf '%s\n' "$1" >> "$LECTURE_UPDATE_LOG"; }
+ulog() { ulograw "$(/bin/date '+%F %T') $1"; }
+
 reset() {
   rm -rf "$T/incoming"/* "$T/outgoing"/* "$T/archive"/* "$T/_needs-review"/* \
          "$T/state/alerts"/* "$T/fired.log" 2>/dev/null
   : > "$T/logs/process.log"
   mkpc
   bk 6 vary 1
+  # Здоровий стан за замовчуванням: свіжий result=ok, 0 пакетів — той самий
+  # принцип, що mkpc()/bk() вище (reset = "усе гаразд", а не порожньо).
+  : > "$LECTURE_UPDATE_LOG"
+  ulog 'result=ok checked=1 busy=0 upgraded=0 pkgs="" pending_other="" reboot_required=no busy_at_reboot=no rebooted=no duration_s=30'
 }
 old() { touch -d "$1" "$2"; }
 # rec N — N сьогоднішніх відео в archive (стан "оброблено")
@@ -106,7 +117,7 @@ reset; rec 1; H=21 D=2 run "ВТ, 1 з 1 — мовчить" SILENT no_recording
 reset;        H=21 D=2 run "ВТ, 0 з 1 — кричить" FIRE no_recording
 reset; rec 1; H=21 D=5 run "ПТ, 1 з 1 — мовчить" SILENT no_recording
 reset; rec 1; H=21 D=6 run "СБ, 1 з 2 — кричить (недобір)" FIRE no_recording
-reset; rec 2; H=21 D=6 run "СБ, 2 з 2 — мовчить" SILENT no_recording
+reset; rec 4; H=21 D=6 run "СБ, 4 з 4 — мовчить" SILENT no_recording
 reset;        H=21 D=1 run "ПН — не день пар, мовчить" SILENT no_recording
 # СР перестала бути порожнім днем 09.09.2026: бокс переїхав із спортзалу 24 в
 # онлайн і тепер пишеться. Кейс не видалений, а перевернутий — саме він упав
@@ -197,6 +208,50 @@ bk 6 vary 1;          H=12 D=3 run "12. джерело ожило — штамп
 reset; rm -rf "$T/backups"
                       H=12 D=3 run "12. теки бекапів немає — мовчить, це не збій" SILENT backup_stale
 mkdir -p "$T/backups"
+
+echo "=== перевірка 13: нічний апдейт — помітний результат ==="
+reset; ulog 'result=skipped_busy checked=1 busy=1 upgraded=0 pkgs="" pending_other="" reboot_required=no busy_at_reboot=no rebooted=no duration_s=1'
+             H=12 D=3 run "13. skipped_busy — кричить" FIRE nightly_update
+reset; ulog 'result=ok checked=1 busy=0 upgraded=0 pkgs="" pending_other="" reboot_required=no busy_at_reboot=no rebooted=no duration_s=40'
+             H=12 D=3 run "13. ok, 0 пакетів — мовчить" SILENT nightly_update
+reset; ulog 'result=ok checked=1 busy=0 upgraded=3 pkgs="libc6,perl,tzdata" pending_other="" reboot_required=no busy_at_reboot=no rebooted=no duration_s=40'
+             H=12 D=3 run "13. ok, 3 пакети — кричить" FIRE nightly_update
+reset; ulog 'result=ok checked=1 busy=0 upgraded=1 pkgs="linux-image-generic" pending_other="" reboot_required=yes busy_at_reboot=no rebooted=yes duration_s=90'
+             H=12 D=3 run "13. reboot_required=yes — кричить" FIRE nightly_update
+reset; ulog 'result=apt_error stage=update checked=1 busy=0 upgraded=0 pkgs="" pending_other="" reboot_required=unknown busy_at_reboot=no rebooted=no duration_s=2'
+             H=12 D=3 run "13. apt_error — кричить" FIRE nightly_update
+reset; ulog 'post_reboot_check services_ok=no failed="wg-quick@wg0"'
+             H=12 D=3 run "13. services_ok=no після ребуту — кричить" FIRE nightly_update
+reset; ulog 'result=ok checked=1 busy=0 upgraded=0 pkgs="" pending_other="docker-ce,docker-ce-cli" reboot_required=no busy_at_reboot=no rebooted=no duration_s=38'
+             H=12 D=3 run "13. лише pending_other (docker-ce) — мовчить, навмисно (Роман, 10.09.2026)" SILENT nightly_update
+reset; ulog 'result=ok checked=1 busy=0 upgraded=2 pkgs="libc6,perl" pending_other="" reboot_required=no busy_at_reboot=no rebooted=no duration_s=40'
+             H=12 D=3 run "13. готуємо штамп" FIRE nightly_update
+             H=12 D=3 run "13. без нового рядка в лозі — штамп знято" SILENT nightly_update
+
+echo "=== перевірка 14: нічний апдейт мовчить понад місяць ==="
+reset; : > "$LECTURE_UPDATE_LOG"
+       ulograw "$(/bin/date -d '-5 days' '+%F %T') result=ok checked=1 busy=0 upgraded=0 pkgs=\"\" pending_other=\"\" reboot_required=no busy_at_reboot=no rebooted=no duration_s=40"
+             H=12 D=3 run "14. останній ok 5 днів тому — мовчить" SILENT nightly_update_stale
+reset; : > "$LECTURE_UPDATE_LOG"
+       for i in $(seq 1 8); do ulograw "$(/bin/date -d "-$((40-i)) days" '+%F %T') result=skipped_busy checked=1 busy=1 upgraded=0 pkgs=\"\" pending_other=\"\" reboot_required=no busy_at_reboot=no rebooted=no duration_s=1"; done
+             H=12 D=3 run "14. 40 днів тиші, здебільшого skipped_busy — кричить" FIRE nightly_update_stale
+reset; : > "$LECTURE_UPDATE_LOG"
+       for i in $(seq 1 8); do ulograw "$(/bin/date -d "-$((40-i)) days" '+%F %T') result=apt_error stage=update checked=1 busy=0 upgraded=0 pkgs=\"\" pending_other=\"\" reboot_required=unknown busy_at_reboot=no rebooted=no duration_s=2"; done
+             H=12 D=3 run "14. 40 днів тиші, apt_error — кричить" FIRE nightly_update_stale
+reset; : > "$LECTURE_UPDATE_LOG"
+             H=12 D=3 run "14. лог порожній (root-крон ще не ходив) — кричить" FIRE nightly_update_stale
+# Реальний випадок 10.09.2026: годину по встановленню, перший прогін —
+# skipped_busy (черга ще не розібрана), жодного result=ok ще не було. Стара
+# версія рахувала stale_days=999999 і кричала "мовчить понад 30 днів" — брехня,
+# логу кілька годин. Правильно: мовчати, поки не мине сам поріг.
+reset; : > "$LECTURE_UPDATE_LOG"
+       ulog 'result=skipped_busy checked=1 busy=1 upgraded=0 pkgs="" pending_other="" reboot_required=no busy_at_reboot=no rebooted=no duration_s=0'
+             H=12 D=3 run "14. лише 1 skipped_busy СЬОГОДНІ, ще нема ok — мовчить (не 30 днів)" SILENT nightly_update_stale
+reset; : > "$LECTURE_UPDATE_LOG"
+       ulograw "$(/bin/date -d '-35 days' '+%F %T') result=skipped_busy checked=1 busy=1 upgraded=0 pkgs=\"\" pending_other=\"\" reboot_required=no busy_at_reboot=no rebooted=no duration_s=0"
+             H=12 D=3 run "14. 1 skipped_busy, але 35 днів тому і відтоді жодного ok — кричить" FIRE nightly_update_stale
+reset; rm -f "$LECTURE_UPDATE_LOG"
+             H=12 D=3 run "14. лог узагалі не існує — теж кричить, не мовчить як зламана перевірка" FIRE nightly_update_stale
 
 echo "=== здоровий стан ==="
 reset

@@ -39,6 +39,13 @@ BACKUP_DIR="${LECTURE_BACKUP_DIR:-/var/backups/obsidian_archive/daily}"
 BACKUP_STALE_H=36         # свіжий архів має зʼявлятись щодоби; 36 год = пропущено один
 BACKUP_SAME_MAX=4         # скільки однакових діб поспіль ще можна списати на «не редагував»
 
+# --- нічний apt-апдейт + ребут (root-крон, окремо від конвеєра) ---
+# Той самий патерн, що бекап Obsidian вище: root-крон виробляє артефакт, ми
+# лише ЧИТАЄМО (/var/log, root:root 644) — не запускаємо й не володіємо ним.
+UPDATE_LOG="${LECTURE_UPDATE_LOG:-/var/log/vps-nightly-update.log}"
+UPDATE_STALE_DAYS=30      # скільки днів без result=ok — сигнал розібратись
+UPDATE_LOOKBACK=10        # скільки останніх result=-рядків читати для діагнозу причини
+
 # --- пороги боку ПК ---
 PC_STALE_MIN=200          # синк ходить кожні 2 год; 200 хв = пропущено ~2 слоти
 PC_QUIET_END=9            # до 09:00 мовчання ПК — норма, він спить
@@ -82,9 +89,17 @@ PC_BATT_MIN=40            # відсотків перед ніччю
 # карає саме за відсутність рутини, тож Ajax у списку давав би хибний алерт
 # у кожен спокійний вівторок і четвер.
 #
-# Увага: англійська в суботу теж онлайн, але її немає в списку classify.py —
-# якщо писати її в OBS, буде _needs-review і алерт 2 щосуботи.
-LECTURE_SCHEDULE="2:1 3:1 4:4 5:1 6:2"
+# 12.09.2026: англійська (сб) додана в classify.py як окрема дисципліна —
+# суботнє число піднято з 2 до 3, за фактом цієї суботи (08:40 ОТК-практика,
+# 12:42 англійська, 14:30 ОТК-лекція).
+#
+# 16.09.2026: субота нестабільна за кількістю пар (Роман: буває 3, буває 4,
+# стабільного патерну нема). Перевірка 11 — це ПІДЛОГА (seen<N кричить,
+# seen>=N мовчить), тому поріг 3 мовчав би й на 4-парну суботу, де реально
+# записалось лише 3 (одну пропустили). Піднято до 4, щоб не пропустити такий
+# недобір — ціна: гарантований хибний алерт щосуботи, де пар фактично 3.
+# Роман погодився ігнорувати ці хибні алерти.
+LECTURE_SCHEDULE="2:1 3:1 4:4 5:1 6:4"
 RECORDING_CHECK_HOUR=20   # пари закінчуються ~17:00, о 20:00 висновок надійний
 
 mkdir -p "$STATE"
@@ -399,6 +414,160 @@ if [ -d "$BACKUP_DIR" ]; then
             clear_alert backup_stale
         fi
     fi
+fi
+
+# --- 13. Нічний апдейт: помітний результат -----------------------------------
+# Подієва умова, той самий патерн, що 4 (після фіксу інциденту 010): рахуємо
+# рядки в лозі, порівнюємо з попереднім прогоном, і якщо зʼявилось щось нове —
+# дивимось, чи воно "помітне". "Помітне" — це skipped_busy (апдейт пропущено,
+# а не тихо відкладено), apt_error, services_ok=no (щось не піднялось після
+# ребуту), або реальний результат (upgraded>0 / reboot_required=yes). Пакети
+# ПОЗА security (docker-ce тощо, held python3.11) свідомо НЕ входять сюди —
+# Роман 10.09.2026: рядок у лозі досить, без сповіщення (див. vps-nightly-
+# update.sh, поле pending_other).
+ulf="$STATE/update_log.lines"
+if [ -f "$UPDATE_LOG" ]; then
+    cur_lines=$(wc -l < "$UPDATE_LOG" 2>/dev/null || true)
+else
+    cur_lines=0
+fi
+[[ "$cur_lines" =~ ^[0-9]+$ ]] || cur_lines=0
+prev_lines=$(cat "$ulf" 2>/dev/null || true)
+[[ "$prev_lines" =~ ^[0-9]+$ ]] || prev_lines=0
+
+notable=""
+if [ "$cur_lines" -gt "$prev_lines" ]; then
+    new_lines=$(tail -n $(( cur_lines - prev_lines )) "$UPDATE_LOG" 2>/dev/null)
+    notable=$(printf '%s\n' "$new_lines" \
+        | grep -E 'result=skipped_busy|result=apt_error|services_ok=no|upgraded=[1-9]|reboot_required=yes' \
+        || true)
+fi
+
+if [ -n "$notable" ]; then
+    # Переклад сирих key=value рядків у людську мову: речення кажуть, що саме
+    # сталося, рядок логу лишається в дужках для довідки — той самий принцип,
+    # що вже застосований в алертах 1, 5 і 6 (lecture-pipeline.md, "Алерт має
+    # називати перевірку, а не причину"). Логіку "що вважати помітним" вище
+    # не чіпаємо — лише текст, який з нею йде в телеграм.
+    human=()
+    while IFS= read -r line; do
+        [ -z "$line" ] && continue
+        result=$(printf '%s' "$line"     | sed -n 's/.*result=\([^ ]*\).*/\1/p')
+        upgraded=$(printf '%s' "$line"   | sed -n 's/.*upgraded=\([0-9]*\).*/\1/p')
+        pkgs=$(printf '%s' "$line"       | sed -n 's/.*pkgs="\([^"]*\)".*/\1/p')
+        reboot_req=$(printf '%s' "$line" | sed -n 's/.*reboot_required=\([^ ]*\).*/\1/p')
+        rebooted=$(printf '%s' "$line"   | sed -n 's/.*rebooted=\([^ ]*\).*/\1/p')
+        services_ok=$(printf '%s' "$line" | sed -n 's/.*services_ok=\([^ ]*\).*/\1/p')
+        failed=$(printf '%s' "$line"     | sed -n 's/.*failed="\([^"]*\)".*/\1/p')
+
+        case "$result" in
+            skipped_busy)
+                human+=("Пропущено — сервер був зайнятий транскрипцією чи класифікацією, спробує наступної ночі.") ;;
+            apt_error)
+                human+=("apt-оновлення впало з помилкою — дивись $UPDATE_LOG.") ;;
+            ok)
+                if [ -n "$upgraded" ] && [ "$upgraded" -gt 0 ]; then
+                    if [ -n "$pkgs" ]; then
+                        human+=("Оновлено пакетів: $upgraded ($pkgs).")
+                    else
+                        human+=("Оновлено пакетів: $upgraded.")
+                    fi
+                fi
+                if [ "$rebooted" = "yes" ]; then
+                    human+=("Після оновлення сервер перезавантажився.")
+                elif [ "$reboot_req" = "yes" ]; then
+                    human+=("Потрібен перезапуск сервера, ще не відбувся (був зайнятий).")
+                fi
+                ;;
+        esac
+        if [ "$services_ok" = "no" ]; then
+            if [ -n "$failed" ]; then
+                human+=("Після перезавантаження не піднялись служби: $failed.")
+            else
+                human+=("Після перезавантаження не всі служби піднялись самі.")
+            fi
+        fi
+
+        human+=("(лог: $line)")
+    done <<< "$notable"
+
+    fire nightly_update "$(printf '%s\n' \
+        "🔧 Нічний апдейт VPS" \
+        "" \
+        "${human[@]}")"
+else
+    clear_alert nightly_update
+fi
+echo "$cur_lines" > "$ulf"
+
+# --- 14. Нічний апдейт мовчить понад місяць -----------------------------------
+# Станова умова (на відміну від 13): дивимось не на нову подію, а на те, скільки
+# часу минуло від ОСТАННЬОГО result=ok. skipped_busy і apt_error в рахунок не
+# йдуть — вони не підтверджують, що апдейт справді перевірено.
+#
+# Коли давно нема result=ok, причину не вгадуємо, а читаємо з останніх
+# UPDATE_LOOKBACK рядків result=: більшість skipped_busy → стабільно зайнятий;
+# є apt_error → apt падає; рядків result= взагалі нема → root-крон не ходить.
+#
+# Навмисно БЕЗ "if [ -f "$UPDATE_LOG" ]" навколо всього блоку: якщо файл
+# узагалі не існує (root-крон ніколи не ставили чи хтось видалив лог), це теж
+# має кричати, а не тихо пропускати перевірку — той самий урок, що інциденти
+# 005/007/010: зламана перевірка не повинна виглядати як здоровий стан.
+if [ -f "$UPDATE_LOG" ]; then
+    last_ok_line=$(grep 'result=ok' "$UPDATE_LOG" 2>/dev/null | tail -1)
+    first_line=$(head -1 "$UPDATE_LOG" 2>/dev/null)
+else
+    last_ok_line=""
+    first_line=""
+fi
+
+if [ -n "$last_ok_line" ]; then
+    last_ok_date=$(printf '%s' "$last_ok_line" | awk '{print $1}')
+    last_ok_epoch=$(date -d "$last_ok_date" +%s 2>/dev/null || echo 0)
+    stale_days=$(( ( $(date +%s) - last_ok_epoch ) / 86400 ))
+elif [ -n "$first_line" ]; then
+    # ЖОДНОГО result=ok ще не було, але лог не порожній. Знайдено живцем
+    # 10.09.2026, годину по встановленню: перший прогін після установки був
+    # skipped_busy (чергу ще не розібрано), і БЕЗ цієї гілки stale_days одразу
+    # ставав 999999 — щойно поставлений root-крон кричав "мовчить понад 30
+    # днів", хоча логу було кілька годин. Правильне питання не "чи БУЛО
+    # result=ok", а "чи ДОСИТЬ ЧАСУ минуло без нього" — тому рахуємо від
+    # НАЙСТАРІШОГО рядка (моменту встановлення), а не вдаємо нескінченність.
+    first_date=$(printf '%s' "$first_line" | awk '{print $1}')
+    first_epoch=$(date -d "$first_date" +%s 2>/dev/null || echo 0)
+    stale_days=$(( ( $(date +%s) - first_epoch ) / 86400 ))
+else
+    # Лог порожній або не існує взагалі — тут і справді нема жодних даних,
+    # і мовчати не можна: якщо root-крон мав ставитись, а файлу нема, це саме
+    # та проблема, яку перевірка існує ловити.
+    stale_days=999999
+fi
+
+if [ "$stale_days" -gt "$UPDATE_STALE_DAYS" ]; then
+    recent=$(grep 'result=' "$UPDATE_LOG" 2>/dev/null | tail -"$UPDATE_LOOKBACK")
+    recent_n=$(printf '%s\n' "$recent" | grep -c . || true)
+    busy_n=$(printf '%s\n' "$recent" | grep -c 'result=skipped_busy' || true)
+    err_n=$(printf '%s\n' "$recent" | grep -c 'result=apt_error' || true)
+    [[ "$recent_n" =~ ^[0-9]+$ ]] || recent_n=0
+    [[ "$busy_n" =~ ^[0-9]+$ ]] || busy_n=0
+    [[ "$err_n" =~ ^[0-9]+$ ]] || err_n=0
+
+    if [ "$recent_n" -eq 0 ]; then
+        reason="скрипт узагалі не запускався — перевір root-крон (sudo crontab -l) і сам файл $UPDATE_LOG"
+    elif [ "$busy_n" -gt 0 ] && [ "$busy_n" -ge $(( recent_n / 2 )) ]; then
+        reason="стабільно зайнятий: $busy_n з останніх $recent_n прогонів пропущено через whisper/ollama/чергу"
+    elif [ "$err_n" -gt 0 ]; then
+        reason="apt падає: $err_n з останніх $recent_n прогонів result=apt_error, дивись $UPDATE_LOG"
+    else
+        reason="прогони йдуть, але жоден не result=ok понад $UPDATE_STALE_DAYS днів — розібратись вручну"
+    fi
+
+    fire nightly_update_stale "$(printf '%s\n' \
+        "⚠️ Нічний апдейт VPS мовчить понад $UPDATE_STALE_DAYS днів" \
+        "" \
+        "Причина: $reason")"
+else
+    clear_alert nightly_update_stale
 fi
 
 # --- доказ життя для watchdog.sh ---------------------------------------------
