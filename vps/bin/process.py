@@ -301,8 +301,18 @@ def transcript_name(title: str, rec_date: datetime) -> str:
     budget = FILENAME_BYTE_MAX - len(suffix.encode("utf-8"))
     name_title = title
     if len(title.encode("utf-8")) > budget:
-        name_title = _truncate_utf8(title, budget - len("…".encode("utf-8")))
-        name_title = name_title.rstrip(" .,;:-—") + "…"
+        # Хвіст ` (тип, дата)` береже те саме правило, що в make_title: ріжеться
+        # ТЕМА, а не кінець. Перша версія (14.09.2026) різала з хвоста й 19.09.2026
+        # віддала транскрипт без дати: `…заняття з англійської мови (практика… [14-21].md`.
+        m = re.search(r" \([^()]*\)$", title)
+        tail = m.group(0) if m else ""
+        ell = "…".encode("utf-8")
+        room = budget - len(tail.encode("utf-8")) - len(ell)
+        if tail and room >= 20:
+            front = _truncate_utf8(title[:m.start()], room).rstrip(" .,;:-—")
+            name_title = front + "…" + tail
+        else:
+            name_title = _truncate_utf8(title, budget - len(ell)).rstrip(" .,;:-—") + "…"
     return f"{name_title}{suffix}"
 
 

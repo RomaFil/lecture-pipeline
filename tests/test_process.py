@@ -145,6 +145,18 @@ n = process.transcript_name(real_ok, datetime(2026, 9, 8, 14, 54))
 check("реальний 154-байтний заголовок (працював на сервері) лишається цілим",
       n == real_ok + " [14-54].md", n)
 
+# Регресія 19.09.2026: обрізання з хвоста з'їдало дату й тип заняття —
+# у vault приїхало `…заняття з англійської мови (практика… [14-21].md`.
+tail_title = "Англійська мова професійного спрямування — заняття з англійської мови (практика, 19.09.2026)"
+n = process.transcript_name(tail_title, datetime(2026, 9, 19, 14, 21))
+check("обрізане ім'я зберігає тип і дату", "(практика, 19.09.2026) [14-21].md" in n, n)
+check("обрізане ім'я з хвостом вкладається в стелю",
+      len(n.encode("utf-8")) <= process.FILENAME_BYTE_MAX and "…" in n,
+      f"{len(n.encode('utf-8'))}: {n}")
+n = process.transcript_name(process.make_title(CISCO, "х" * 70, "лабораторна", D), D)
+check("найгірший випадок (CISCO + 70 + лабораторна): дата цілa",
+      " (лабораторна, " in n and n.endswith(" [14-15].md") and ")" in n.split("…")[-1], n)
+
 real_fail = ("Комп'ютерні мережі та безпека за технологіями CISCO — "
              "Технології каналного рівня і мережі")
 n = process.transcript_name(real_fail, datetime(2026, 9, 11, 13, 47))
