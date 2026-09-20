@@ -305,6 +305,31 @@ def _pick_topic_index(votes: list, win: str) -> int:
     return next((i for i in winners if i != 0), winners[-1])
 
 
+def _pick_kind(kinds: list, fallback: str) -> str:
+    """Тип заняття: більшість голосів усіх фрагментів; «невідомо» — утримання, а не голос.
+
+    Раніше kind брався з фрагмента теми (kinds[idx]) — і хибний тип при правильній
+    дисципліні був найчастішою помилкою (4 з 8 на звірці 18.09.2026). Проста
+    більшість по всіх трьох при цьому зламала t10, бо «невідомо» на вступі
+    рахувалось нарівні з типом. Тип — властивість усього заняття, а не дисципліни,
+    тому голосують ВСІ фрагменти, навіть ті, що помилились у subject.
+
+    При нічиї (або коли всі утримались) — `fallback`, тобто стара поведінка.
+    Заміряно 20.09.2026 на 17 записах (tests/collect_votes.py + replay_kind.py):
+    поточне правило 13/17, це — 15/17, жодного запису не зіпсовано, t10 цілий.
+    Дві помилки, що лишились, голосуванням не лікуються: в одній усі три
+    фрагменти одностайно кажуть «лекція» при практиці, в іншій — нічия
+    лекція/практика.
+    """
+    known = [k for k in kinds if k != "невідомо"]
+    if not known:
+        return fallback
+    top = collections.Counter(known).most_common()
+    if len(top) > 1 and top[0][1] == top[1][1]:
+        return fallback
+    return top[0][0]
+
+
 def classify_voted(transcript: str, n: int = 5000) -> dict:
     """Класифікація голосуванням трьох фрагментів (початок / середина / кінець).
 
@@ -366,13 +391,14 @@ def classify_voted(transcript: str, n: int = 5000) -> dict:
         }
 
     full, slug = SUBJECTS[win]
+    kind = _pick_kind(kinds, kinds[idx])
     return {
         "ok": True,
         "subject": full,
         "slug": slug,
-        "kind": kinds[idx],
+        "kind": kind,
         "topic": topic,
-        "raw": {**base_raw, "kind": kinds[idx], "winner_fragment": idx},
+        "raw": {**base_raw, "kind": kind, "kinds": kinds, "winner_fragment": idx},
     }
 
 
