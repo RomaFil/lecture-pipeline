@@ -7,7 +7,15 @@ import time
 from pathlib import Path
 
 os.environ.setdefault("LECTURE_KEEP_ALIVE", "5m")
-sys.path.insert(0, str(Path(__file__).parent))
+# Тест мусить імпортувати БОЙОВИЙ classify.py, а не копію поруч із собою: 18.09.2026
+# на VPS у tests/ лишилась копія попередньої версії й мовчки перекривала справжню —
+# тести перевіряли не той файл (виявлено 20.09.2026 при додаванні _pick_kind).
+for _cand in (os.environ.get("LECTURES_BIN"),
+              Path(__file__).resolve().parent.parent / "vps" / "bin",
+              Path.home() / "lectures" / "bin"):
+    if _cand and (Path(_cand) / "classify.py").exists():
+        sys.path.insert(0, str(_cand))
+        break
 import classify as clf  # noqa: E402
 
 
