@@ -23,7 +23,7 @@ import sqlite3
 import subprocess
 import sys
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 BASE = Path(os.getenv("LECTURES_HOME", Path.home() / "lectures"))
@@ -183,6 +183,28 @@ def send_to_review(db, video: Path, sha: str, rec_date: datetime, reason: str,
         body)
     shutil.move(str(video), str(REVIEW / video.name))
     set_status(db, sha, "needs_review", error=reason)
+
+
+OBS_NAME = re.compile(r"^(\d{4})-(\d{2})-(\d{2}) (\d{2})-(\d{2})-(\d{2})")
+
+
+def recording_interval(video: Path, rec_date: datetime, duration: float):
+    """(старт, кінець) запису для підказки за розкладом; None, якщо не визначити.
+
+    Старт — з імені файлу OBS (`2026-09-19 12-21-46.mkv`): mtime — це кінець, і OBS
+    оновлює його рідко (17.09.2026 mtime Схемотехніки збігся зі стартом). Кінець —
+    старт + тривалість, коли тривалість відома; інакше mtime. Файл без OBS-імені
+    (скачаний, перейменований) — старт як mtime − тривалість.
+    """
+    m = OBS_NAME.match(video.name)
+    if m:
+        start = datetime(*(int(g) for g in m.groups()))
+        end = start + timedelta(seconds=duration) if duration else rec_date
+    elif duration:
+        start, end = rec_date - timedelta(seconds=duration), rec_date
+    else:
+        return None
+    return (start, end) if end > start else None
 
 
 def extract_wav(video: Path, wav: Path):
@@ -417,7 +439,11 @@ def process_one(db, video: Path):
     # підхід давав 6/8 на справжніх записах, з confidence=high на всіх помилках —
     # див. classify.classify_voted() і "Стан на 09.09.2026" у lecture-pipeline.md)
     import classify as clf
-    res = clf.classify_voted(plain)
+    import timetable
+    # Розклад — підказка для розбіжних голосів, не правило (див. timetable.py).
+    interval = recording_interval(video, rec_date, duration)
+    expected = timetable.expected_subjects(*interval) if interval else set()
+    res = clf.classify_voted(plain, expected=expected)
     log.info("класифікатор: %s", json.dumps(res.get("raw", {}), ensure_ascii=False))
 
     if not res["ok"]:

@@ -305,6 +305,45 @@ def _pick_topic_index(votes: list, win: str) -> int:
     return next((i for i in winners if i != 0), winners[-1])
 
 
+def _apply_schedule(votes: list, expected: set) -> tuple:
+    """Розклад як підказка: (дисципліна | None, голосів за неї, пояснення).
+
+    `expected` — коди дисциплін, які за розкладом мали йти в цей час (timetable.py).
+    Розклад НІКОЛИ не призначає дисципліну сам — лише перевіряє голоси:
+
+      * 3/3 одностайно — голоси не чіпаємо навіть проти розкладу (заняття могли
+        перенести або замінити; одностайність сильніша за таблицю);
+      * більшість збігається з розкладом — без змін;
+      * більшість 2/3 суперечить розкладу, а хтось із трьох голосів — за розклад →
+        перемагає розклад (саме так виглядала більшість хибних відповідей:
+        ОТК → СХЕМОТЕХНІКА 2/3 з одним голосом за ОТК);
+      * більшість суперечить розкладу і жодного голосу за розклад немає →
+        None, тобто _needs-review: краще один ручний розбір, ніж запис у чужому
+        плейлисті без жодного сигналу;
+      * розкол 1/1/1 і рівно один голос збігається з розкладом → він і перемагає;
+      * порожній `expected` (розклад цього часу не знає) — без змін.
+    """
+    win, count = _tally(votes)
+    exp = {c for c in expected if c in SUBJECTS}
+    if not exp or count == len(votes):
+        return win, count, ""
+    if count >= 2 and win in exp:
+        return win, count, ""
+    candidates = [c for c in exp if c in votes]
+    n = len(votes)
+    if count >= 2:
+        if candidates:
+            pick = max(candidates, key=votes.count)
+            return pick, votes.count(pick), (
+                f"розклад {sorted(exp)} переважив більшість {win} {count}/{n}")
+        return None, count, (
+            f"голоси {win} {count}/{n} суперечать розкладу {sorted(exp)}, "
+            f"жодного голосу за розклад")
+    if len(candidates) == 1:
+        return candidates[0], 1, f"розклад {sorted(exp)} розв'язав розкол голосів"
+    return win, count, ""
+
+
 def _pick_kind(kinds: list, fallback: str) -> str:
     """Тип заняття: більшість голосів усіх фрагментів; «невідомо» — утримання, а не голос.
 
@@ -330,7 +369,7 @@ def _pick_kind(kinds: list, fallback: str) -> str:
     return top[0][0]
 
 
-def classify_voted(transcript: str, n: int = 5000) -> dict:
+def classify_voted(transcript: str, n: int = 5000, expected: set = None) -> dict:
     """Класифікація голосуванням трьох фрагментів (початок / середина / кінець).
 
     Основний шлях конвеєра з 09.09.2026 — замінює одноразовий classify() у
@@ -366,18 +405,19 @@ def classify_voted(transcript: str, n: int = 5000) -> dict:
     kinds = [str(d.get("kind", "невідомо")) for d in results]
     keywords = "; ".join(str(d.get("keywords", "")) for d in results)
 
-    win, count = _tally(votes)
+    win, count, sched_note = _apply_schedule(votes, expected or set())
     # Форма raw навмисно сумісна з raw одноразового classify(): те саме верхньоy
     # рівневе "subject" (код, не повна назва), "kind", "confidence" — щоб звіт
     # test_classifier.py друкував однаково для обох шляхів, і щоб код навколо
     # (напр. лог у process.py) не мусив розрізняти, звідки прийшов результат.
-    base_raw = {"votes": votes, "subject": win if count >= 2 else None,
+    base_raw = {"votes": votes, "subject": win if win in SUBJECTS and (count >= 2 or sched_note) else None,
                 "confidence": f"{count}/{len(parts)}", "topics": topics_raw,
-                "keywords": keywords, "results": results}
-    if count < 2 or win not in SUBJECTS:
+                "keywords": keywords, "results": results,
+                "schedule": sorted(expected or []), "schedule_note": sched_note}
+    if win is None or win not in SUBJECTS or (count < 2 and not sched_note):
         return {
             "ok": False,
-            "reason": f"голоси розійшлися: {votes}",
+            "reason": sched_note or f"голоси розійшлися: {votes}",
             "raw": base_raw,
         }
 
