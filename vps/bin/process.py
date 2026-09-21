@@ -445,6 +445,13 @@ def process_one(db, video: Path):
     expected = timetable.expected_subjects(*interval) if interval else set()
     res = clf.classify_voted(plain, expected=expected)
     log.info("класифікатор: %s", json.dumps(res.get("raw", {}), ensure_ascii=False))
+    hint = res.get("raw", {}).get("schedule_note")
+    if hint:
+        # Окремий рядок з ASCII-маркером: alert.sh (перевірка 15) рахує саме його.
+        # WARNING, не ERROR — це не збій, а подія, яку людині варто побачити:
+        # розклад або переважив голоси, або відправив запис на ручний розбір.
+        log.warning("SCHEDULE_HINT: %s | запис: %s | голоси: %s",
+                    hint, video.name, res["raw"].get("votes"))
 
     if not res["ok"]:
         # unrecognized — нічого не вгадуємо, нічого не видаляємо, нічого не аплоадимо

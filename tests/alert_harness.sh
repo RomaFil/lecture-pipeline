@@ -28,7 +28,8 @@ export LECTURE_BACKUP_DIR="$T/backups"
 export LECTURE_UPDATE_LOG="$T/update.log"
 
 printf '%s\n' '#!/bin/bash' \
-  'echo "FIRED: $(echo "$1" | head -1)" >> "$HOME/alerttest/fired.log"' > "$T/bin/notify.sh"
+  'echo "FIRED: $(echo "$1" | head -1)" >> "$HOME/alerttest/fired.log"' \
+  'printf "%s\n=====\n" "$1" >> "$HOME/alerttest/full.log"' > "$T/bin/notify.sh"
 chmod +x "$T/bin/notify.sh"
 
 # шим date: підміняє годину (+%-H) і день тижня (+%u), решту віддає системному
@@ -72,7 +73,7 @@ ulog() { ulograw "$(/bin/date '+%F %T') $1"; }
 
 reset() {
   rm -rf "$T/incoming"/* "$T/outgoing"/* "$T/archive"/* "$T/_needs-review"/* \
-         "$T/state/alerts"/* "$T/fired.log" 2>/dev/null
+         "$T/state/alerts"/* "$T/fired.log" "$T/full.log" 2>/dev/null
   : > "$T/logs/process.log"
   mkpc
   bk 6 vary 1
@@ -252,6 +253,36 @@ reset; : > "$LECTURE_UPDATE_LOG"
              H=12 D=3 run "14. 1 skipped_busy, але 35 днів тому і відтоді жодного ok — кричить" FIRE nightly_update_stale
 reset; rm -f "$LECTURE_UPDATE_LOG"
              H=12 D=3 run "14. лог узагалі не існує — теж кричить, не мовчить як зламана перевірка" FIRE nightly_update_stale
+
+echo "=== перевірка 15: розклад втрутився в класифікацію ==="
+HINT1='WARNING SCHEDULE_HINT: розклад [ФІЗИКА] переважив більшість ТЕОРІЯ_КІЛ 2/3 | запис: 2026-09-22 10-26-00.mkv | голоси: [ФІЗИКА, ТЕОРІЯ_КІЛ, ТЕОРІЯ_КІЛ]'
+HINT2='WARNING SCHEDULE_HINT: голоси МАТАНАЛІЗ 2/3 суперечать розкладу [ТЕОРІЯ_КІЛ], жодного голосу за розклад | запис: 2026-09-22 08-45-00.mkv'
+reset; "$T/bin/alert.sh" >/dev/null 2>&1
+cnt=$(cat "$T/state/alerts/schedule_hint.count")
+if [ "$cnt" = "0" ]; then pass=$((pass+1)); echo "  OK   15. база на порожньому лозі — один рядок 0"
+else fail=$((fail+1)); echo "  FAIL 15. база зіпсована: [$cnt]"; fi
+# Перший запуск лише запам'ятовує базу: історичні події — не новина
+reset; printf '%s\n' "2026-09-01 10:00:00,000 $HINT1" >> "$T/logs/process.log"
+                                           H=12 D=3 run "15. історичний рядок на першому запуску — мовчить" SILENT schedule_hint
+printf '%s\n' "2026-09-22 10:30:00,000 $HINT1" >> "$T/logs/process.log"
+                                           H=12 D=3 run "15. нова подія SCHEDULE_HINT — кричить" FIRE schedule_hint
+                                           H=12 D=3 run "15. штамп знято, коли нових подій немає" SILENT schedule_hint
+printf '%s\n' "2026-09-22 11:30:00,000 $HINT2" >> "$T/logs/process.log"
+FAKE_HOUR=12 FAKE_DOW=3 "$T/bin/alert.sh" >/dev/null 2>&1
+sent=$(grep -c 'розклад втрутився' "$T/fired.log" 2>/dev/null || true)
+[[ "$sent" =~ ^[0-9]+$ ]] || sent=0
+if [ "$sent" -eq 2 ]; then pass=$((pass+1)); echo "  OK   15. друга подія ДОЛЕТІЛА, не з'їдена кулдауном  SENT=2"
+else fail=$((fail+1)); echo "  FAIL 15. друга подія: очікував SENT=2, отримав SENT=$sent"; fi
+# У повідомленні має бути сам запис і причина — без цього алерт не каже, куди дивитись
+# (фрази беруться з ДИНАМІЧНОГО рядка події: статичне пояснення в кінці алерту
+# теж містить «суперечать розкладу», і перевірка за ним була б тавтологією)
+# (fired.log має лише перший рядок повідомлення — повний текст у full.log)
+if grep -q 'жодного голосу за розклад |' "$T/full.log" && grep -q '08-45-00.mkv' "$T/full.log"; then
+  pass=$((pass+1)); echo "  OK   15. повідомлення містить причину й імʼя запису"
+else fail=$((fail+1)); echo "  FAIL 15. у повідомленні немає причини чи імені запису"; fi
+reset; "$T/bin/alert.sh" >/dev/null 2>&1
+printf '%s\n' "2026-09-22 10:30:00,000 WARNING 2026-09-22 08-45-00.mkv: UNRECOGNIZED (голоси розійшлися)" >> "$T/logs/process.log"
+                                           H=12 D=3 run "15. звичайний WARNING без маркера не рахується" SILENT schedule_hint
 
 echo "=== здоровий стан ==="
 reset

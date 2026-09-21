@@ -352,6 +352,15 @@ check("підказка: два кандидати (сб 14:15) — обирає
 check("підказка: невідомий код у розкладі ігнорується",
       _clf._apply_schedule([_TK, _SC, _SC], {"НЕ_ТАКИЙ_КОД"}) == (_SC, 2, ""))
 
+import inspect  # noqa: E402
+check("process_one логує маркер SCHEDULE_HINT: — його рахує alert.sh (перевірка 15)",
+      "SCHEDULE_HINT:" in inspect.getsource(process.process_one))
+_alert = next((p for p in (Path(__file__).resolve().parents[1] / "vps" / "bin" / "alert.sh",
+                           Path.home() / "lectures" / "bin" / "alert.sh") if p.exists()), None)
+check("alert.sh шукає той самий маркер (розʼїзд імен вимкнув би перевірку 15 мовчки)",
+      _alert is not None and "grep -c 'SCHEDULE_HINT:'" in _alert.read_text(encoding="utf-8"),
+      str(_alert))
+
 _v = Path("/x/2026-09-19 12-21-46.mkv")
 check("інтервал: старт з імені OBS, кінець = старт + тривалість",
       process.recording_interval(_v, _d(2026, 9, 19, 14, 21), 7209.0)
