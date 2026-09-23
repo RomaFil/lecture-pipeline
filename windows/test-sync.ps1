@@ -264,6 +264,35 @@ Test-Case 'дужки з часом у назві не ламають запис
     Assert-True ($txt -like '*`[14-54`]*') 'час у назві вцілів'
 }
 
+Write-Host ''
+Write-Host '=== Get-NightWakeStatus: старт задачі -> "прокинувся" лише якщо ПК і справді спав (інцидент 018) ==='
+Test-Case 'не спав перед вікном -> -1, тест непридатний (задача стартувала на увімкненому ПК)' {
+    $r = Get-NightWakeStatus -SleepEvents @() -WakeEvents @() -TaskEvents @(1)
+    Assert-Equal -1 $r 'night_wake_ok'
+}
+Test-Case 'спав, реально прокинувся, задача стартувала -> 1' {
+    $r = Get-NightWakeStatus -SleepEvents @(1) -WakeEvents @(1) -TaskEvents @(1)
+    Assert-Equal 1 $r 'night_wake_ok'
+}
+Test-Case 'спав, але не прокинувся (немає 507) -> 0' {
+    $r = Get-NightWakeStatus -SleepEvents @(1) -WakeEvents @() -TaskEvents @()
+    Assert-Equal 0 $r 'night_wake_ok'
+}
+Test-Case 'спав, прокинувся (507 є), але задача не стартувала -> 0' {
+    $r = Get-NightWakeStatus -SleepEvents @(1) -WakeEvents @(1) -TaskEvents @()
+    Assert-Equal 0 $r 'night_wake_ok'
+}
+Test-Case 'зовсім нічого не сталось (не спав, не прокидався, задача не стартувала) -> -1' {
+    $r = Get-NightWakeStatus -SleepEvents @() -WakeEvents @() -TaskEvents @()
+    Assert-Equal -1 $r 'night_wake_ok'
+}
+Test-Case 'регресія 018: старий баг — задача стартувала на увімкненому ПК давала б хибний 1' {
+    # Це рівно сценарій 22.09.2026: ПК не спав, задача 23:00 стартувала за розкладом.
+    # Стара перевірка (лише TaskEvents.Count -gt 0) повернула б 1 — хибне "пробудження спрацювало".
+    $r = Get-NightWakeStatus -SleepEvents @() -WakeEvents @() -TaskEvents @(1)
+    Assert-True ($r -ne 1) 'задача без сну не повинна виглядати як успішне пробудження'
+}
+
 Remove-Item -LiteralPath $Sandbox -Recurse -Force -ErrorAction SilentlyContinue
 
 Write-Host ''

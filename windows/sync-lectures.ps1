@@ -336,6 +336,28 @@ function Add-WikiLogEntry {
     }
 }
 
+# --- чи справді прокинувся ПК за нічним таймером (не лише "задача стартувала") ---
+# Виправлено 23.09.2026 (інцидент 018 у Журналі інцидентів конвеєра): стара
+# перевірка бачила лише старт задачі Lectures Sync (Task Scheduler 100/110)
+# у вікні 22:55-23:15 — а вона стартує однаково, і коли ПК просто був
+# увімкнений увесь вечір. Виділено окремою чистою функцією саме тому, що
+# Get-WinEvent читає живий журнал і не мокається напряму — так її можна
+# перевірити тестом на підставних масивах подій.
+function Get-NightWakeStatus {
+    param(
+        [Parameter(Mandatory)] [AllowEmptyCollection()] [array]$SleepEvents,  # Kernel-Power 506 перед вікном
+        [Parameter(Mandatory)] [AllowEmptyCollection()] [array]$WakeEvents,   # Kernel-Power 507 у вікні
+        [Parameter(Mandatory)] [AllowEmptyCollection()] [array]$TaskEvents    # Lectures Sync 100/110 у вікні
+    )
+    if ($SleepEvents.Count -eq 0) {
+        return -1   # ПК і так не спав перед вікном — WakeToRun цього разу не перевірявся
+    }
+    if ($WakeEvents.Count -gt 0 -and $TaskEvents.Count -gt 0) {
+        return 1    # справді спав, реально прокинувся, задача стартувала
+    }
+    return 0        # мав прокинутись за таймером і не зміг
+}
+
 # --- звіт про стан ПК ---------------------------------------------------------
 function Send-PcStatus {
     # ПК звітує ФАКТАМИ, судить VPS. Причина: сторож має жити там, де завжди
@@ -414,17 +436,36 @@ function Send-PcStatus {
         } catch { $kv['task_timeouts_24h'] = -1 }
 
         # --- чи спрацював нічний запуск о 23:00 (гіпотеза 4b) ---
+        # Три джерела: сон (506) перед вікном, пробудження (507) і старт задачі
+        # в самому вікні — рішення виносить Get-NightWakeStatus, див. інцидент 018.
         try {
             $nightStart = $now.Date.AddDays(-1).AddHours(22).AddMinutes(55)
             if ($now.Hour -lt 2) { $nightStart = $nightStart.AddDays(-1) }
-            $nw = @(Get-WinEvent -FilterHashtable @{
-                        LogName   = 'Microsoft-Windows-TaskScheduler/Operational'
-                        Id        = @(100, 110)
-                        StartTime = $nightStart
-                        EndTime   = $nightStart.AddMinutes(20)
-                    } -ErrorAction SilentlyContinue |
-                    Where-Object { $_.Message -match 'Lectures Sync' })
-            $kv['night_wake_ok'] = if ($nw.Count -gt 0) { 1 } else { 0 }
+            $nightEnd = $nightStart.AddMinutes(20)
+
+            $sleepEvents = @(Get-WinEvent -FilterHashtable @{
+                                LogName      = 'System'
+                                ProviderName = 'Microsoft-Windows-Kernel-Power'
+                                Id           = 506
+                                StartTime    = $nightStart.AddHours(-2)
+                                EndTime      = $nightStart
+                            } -ErrorAction SilentlyContinue)
+            $wakeEvents = @(Get-WinEvent -FilterHashtable @{
+                                LogName      = 'System'
+                                ProviderName = 'Microsoft-Windows-Kernel-Power'
+                                Id           = 507
+                                StartTime    = $nightStart
+                                EndTime      = $nightEnd
+                            } -ErrorAction SilentlyContinue)
+            $taskEvents = @(Get-WinEvent -FilterHashtable @{
+                                LogName   = 'Microsoft-Windows-TaskScheduler/Operational'
+                                Id        = @(100, 110)
+                                StartTime = $nightStart
+                                EndTime   = $nightEnd
+                            } -ErrorAction SilentlyContinue |
+                            Where-Object { $_.Message -match 'Lectures Sync' })
+
+            $kv['night_wake_ok'] = Get-NightWakeStatus -SleepEvents $sleepEvents -WakeEvents $wakeEvents -TaskEvents $taskEvents
         } catch { $kv['night_wake_ok'] = -1 }
 
         # --- живлення: ноут на 3 % батареї не прокинеться жодним таймером ---
