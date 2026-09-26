@@ -344,6 +344,41 @@ def _apply_schedule(votes: list, expected: set) -> tuple:
     return win, count, ""
 
 
+def _apply_schedule_single(result: dict, expected: set) -> dict:
+    """Розклад для одиночної (невоготованої) класифікації короткого транскрипту.
+
+    26.09.2026: реальний промах — субота 08:41, розклад каже ТЕОРІЯ_КІЛ,
+    класифікатор дав СХЕМОТЕХНІКА, confidence=high. Причина — запис (тиша під
+    час тривоги, мало учасників) дав лише 32 сегменти, тобто `chunks()` звів
+    його до одного фрагмента, і classify_voted() віддавав bare classify(),
+    ЖОДНОГО разу не викликаючи _apply_schedule() — розклад захищав лише
+    voted-шлях, а короткі/рідкісні записи (де класифікатору якраз найлегше
+    помилитися на скупому тексті) лишались зовсім без підказки.
+
+    На відміну від _apply_schedule() (список голосів), тут рівно один голос —
+    він не заслуговує довіри одностайних 3/3 (це не незалежний консенсус,
+    лише одна відповідь моделі). Тому конфлікт із розкладом іде в
+    _needs-review, а не мовчки перемагає й не мовчки програє: той самий
+    консервативний принцип, що й для «більшість проти розкладу, підтримки
+    немає» у _apply_schedule().
+    """
+    if not result.get("ok") or not expected:
+        return result
+    exp = {c for c in expected if c in SUBJECTS}
+    if not exp:
+        return result
+    code = str(result.get("raw", {}).get("subject", UNKNOWN))
+    if code in exp:
+        return result
+    note = f"одиночна класифікація {code} суперечить розкладу {sorted(exp)} (голосування не було)"
+    return {
+        "ok": False,
+        "reason": note,
+        "raw": {**result["raw"], "votes": [code], "schedule": sorted(exp),
+                "schedule_note": note},
+    }
+
+
 def _pick_kind(kinds: list, fallback: str) -> str:
     """Тип заняття: більшість голосів усіх фрагментів; «невідомо» — утримання, а не голос.
 
@@ -387,6 +422,12 @@ def classify_voted(transcript: str, n: int = 5000, expected: set = None) -> dict
     Ціна — три виклики моделі замість одного (~7 хв замість ~2,5 хв), що є
     шумом на тлі 2-3-годинної транскрипції.
 
+    26.09.2026: короткий транскрипт (chunks() дає один фрагмент) досі йшов
+    через bare classify() без жодної перевірки розкладу — _apply_schedule()
+    живе лише в voted-гілці нижче. Тепер однофрагментний результат теж
+    проганяється крізь розклад (_apply_schedule_single) — конфлікт іде в
+    _needs-review, а не мовчки в чужий плейліст. Деталі — [[lecture-pipeline]].
+
     Модель лишається завантаженою МІЖ трьома викликами (keep_alive «30s» для
     перших двох) і вивантажується лише після останнього (дефолт модуля —
     у проді "0"). Без цього кожен із трьох голосів у проді (де KEEP_ALIVE="0"
@@ -396,7 +437,7 @@ def classify_voted(transcript: str, n: int = 5000, expected: set = None) -> dict
     """
     parts = chunks(transcript, n)
     if len(parts) == 1:
-        return classify(transcript, max_chars=n)
+        return _apply_schedule_single(classify(transcript, max_chars=n), expected or set())
 
     results = [_request(SYSTEM, p, keep_alive=None if i == len(parts) - 1 else "30s")
               for i, p in enumerate(parts)]

@@ -352,6 +352,29 @@ check("підказка: два кандидати (сб 14:15) — обирає
 check("підказка: невідомий код у розкладі ігнорується",
       _clf._apply_schedule([_TK, _SC, _SC], {"НЕ_ТАКИЙ_КОД"}) == (_SC, 2, ""))
 
+# --- _apply_schedule_single (26.09.2026): розклад для короткого, невоготованого
+# транскрипту — реальний промах сб 08:41 (розклад ТЕОРІЯ_КІЛ, класифікатор дав
+# СХЕМОТЕХНІКА на 32-сегментному записі, надто короткому для голосування) ------
+_ok_sc = {"ok": True, "subject": "Схемотехніка. Частина 1. Електронні компоненти",
+          "slug": "shemotehnika", "kind": "практика", "topic": "тема",
+          "raw": {"subject": _SC, "confidence": "high", "topic": "тема", "kind": "практика"}}
+_ok_tk = {"ok": True, "subject": "Основи теорії кіл", "slug": "otk", "kind": "практика",
+          "topic": "тема", "raw": {"subject": _TK, "confidence": "high",
+                                    "topic": "тема", "kind": "практика"}}
+_res = _clf._apply_schedule_single(_ok_sc, {_TK})
+check("apply_schedule_single: конфлікт з розкладом → ok=False (needs-review, реальний промах 08:41)",
+      _res["ok"] is False, _res)
+check("apply_schedule_single: конфлікт залишає schedule_note для SCHEDULE_HINT-алерту",
+      "schedule_note" in _res["raw"] and _SC in _res["raw"]["schedule_note"], _res)
+check("apply_schedule_single: збіг з розкладом — без змін", _clf._apply_schedule_single(_ok_tk, {_TK}) == _ok_tk)
+check("apply_schedule_single: порожній розклад (слот невідомий) — без змін",
+      _clf._apply_schedule_single(_ok_sc, set()) == _ok_sc)
+check("apply_schedule_single: невідомий код у розкладі ігнорується — без змін",
+      _clf._apply_schedule_single(_ok_sc, {"НЕ_ТАКИЙ_КОД"}) == _ok_sc)
+_fail = {"ok": False, "reason": "щось інше", "raw": {"subject": _SC}}
+check("apply_schedule_single: вже провалена класифікація не чіпається розкладом",
+      _clf._apply_schedule_single(_fail, {_TK}) == _fail)
+
 import inspect  # noqa: E402
 check("process_one логує маркер SCHEDULE_HINT: — його рахує alert.sh (перевірка 15)",
       "SCHEDULE_HINT:" in inspect.getsource(process.process_one))
