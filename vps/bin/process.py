@@ -48,6 +48,27 @@ LANG = os.getenv("WHISPER_LANG", "uk")
 # піднято до 400, 200% (~2 ядра) свідомо лишено в резерві для WireGuard/Docker/
 # усього іншого (рішення Романа після інциденту 012 з VPN-деградацією).
 WHISPER_CPU_LIMIT = os.getenv("WHISPER_CPU_LIMIT", "400")
+# Паралельна нарізка (chunked_transcribe.py, 26.09.2026): одиночний інстанс
+# whisper масштабується на цій VPS непередбачувано (WHISPER_THREADS 3-6 і
+# "авто" — усі гірші за 2), тоді як кілька паралельних процесів по
+# WHISPER_THREADS=2 обходять цю яму, бо це окремі процеси, а не internal
+# intra-op паралелізм. Виміряно на 10-хв кліпі: 1.085х замість 1.623х.
+# Вимкнено за замовчуванням (CHUNK_ENABLE=0) — вмикається свідомо, після
+# живої перевірки на реальній довгій лекції (план — [[lecture-pipeline]]).
+CHUNK_ENABLE = os.getenv("CHUNK_ENABLE", "0") == "1"
+# Поріг довжини, з якої нарізка вмикається. Коротший запис — фіксована ціна
+# (друге завантаження моделі на кожен шматок, ffmpeg-розрізання) переважує
+# виграш від паралелізму.
+CHUNK_MIN_SECONDS = int(os.getenv("CHUNK_MIN_SECONDS", "900"))
+# 2 шматки — не кількість ядер, а RAM-бюджет: один large-v3 int8 тримає пік
+# ~2.8-2.9 ГБ, 2 паралельно ≈ 5.6-5.8 ГБ, лишає запас під Ollama (~4.7 ГБ),
+# яка стартує одразу після. 3+ не піднімати без окремого заміру пікового
+# RSS на реальних 3 паралельних інстансах.
+CHUNK_COUNT = int(os.getenv("CHUNK_COUNT", "2"))
+# Той самий сумарний бюджет, що й для одиночного інстансу (WHISPER_CPU_LIMIT),
+# поділений порівну між шматками — щоб паралельна нарізка не могла зайняти
+# більше CPU, ніж уже безпечно працює одиночний шлях.
+CHUNK_CPU_LIMIT = str(int(WHISPER_CPU_LIMIT) // CHUNK_COUNT) if CHUNK_ENABLE else None
 VIDEO_EXT = {".mkv", ".mp4", ".m4v", ".mov", ".webm", ".flv"}
 MAX_ATTEMPTS = 3
 # файл, змінений щойно, може ще докачуватись — чекаємо, поки він «устоїться»
@@ -97,6 +118,7 @@ sys.path.insert(0, str(BASE / "bin"))
 # Імпорт саме тут, після sys.path: yt_upload потрібен на рівні модуля, щоб main()
 # міг спіймати yt_upload.QuotaExceeded окремо від решти помилок.
 import yt_upload  # noqa: E402
+import chunked_transcribe  # noqa: E402
 
 for d in (INCOMING, OUTGOING, WORK, ARCHIVE, REVIEW, LOGS):
     d.mkdir(parents=True, exist_ok=True)
@@ -214,12 +236,28 @@ def extract_wav(video: Path, wav: Path):
     )
 
 
-def transcribe(wav: Path) -> dict:
+def transcribe(wav: Path, duration: float = 0.0) -> dict:
     """Транскрипція ОКРЕМИМ процесом — див. transcribe_worker.py щодо причини.
 
     Коротко: whisper тримає ~2.9 ГБ, Ollama слідом просить ~4.7 ГБ, а на VPS
     усього 5.8 ГБ. Лише вихід процесу гарантовано повертає пам'ять ОС.
+
+    duration — уже відома з probe_duration() у process_one(), передається
+    сюди лише щоб вирішити, чи вмикати паралельну нарізку (CHUNK_ENABLE),
+    не переобчислюється.
     """
+    if CHUNK_ENABLE and duration >= CHUNK_MIN_SECONDS:
+        log.info("whisper: паралельна нарізка на %d шматки (CHUNK_ENABLE)", CHUNK_COUNT)
+        t0 = time.time()
+        tmp_dir = wav.parent
+        data = chunked_transcribe.transcribe_chunked(
+            wav, CHUNK_COUNT, tmp_dir,
+            threads=os.getenv("CHUNK_THREADS", "2"), cpu_limit=CHUNK_CPU_LIMIT)
+        log.info("whisper (нарізка): %d сегментів, %.0f с аудіо, мова=%s (p=%.2f), "
+                 "витрачено %.0f с", data["segments"], data["duration"], data["language"],
+                 data["language_probability"], time.time() - t0)
+        return data
+
     out = wav.with_suffix(".json")
     log.info("whisper: %s (cpu/int8) у окремому процесі", WHISPER_MODEL)
     t0 = time.time()
@@ -422,7 +460,7 @@ def process_one(db, video: Path):
     extract_wav(video, wav)
 
     # 2. транскрипція
-    tr = transcribe(wav)
+    tr = transcribe(wav, duration)
     stamped, plain = tr["stamped"], tr["plain"]
     wav.unlink()  # wav більше не потрібен — транскрипт уже на диску
     # Поріг ловить лише справді провальний запис (тиша, збитий кодек, нема доріжки).
