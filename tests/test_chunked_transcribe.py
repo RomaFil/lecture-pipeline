@@ -103,5 +103,45 @@ check("merge_segment_data: порожній чанк не ламає злитт�
       merged3["segments"] == 2, merged3)
 
 
+# --- best_of у воркері (27.09.2026) -------------------------------------------
+# Текстом, а не імпортом: імпорт тягне faster_whisper і модель.
+# Репо: ../vps/bin; на VPS тести лежать у ~/lectures/tests, код — у ~/lectures/bin.
+_worker = next(p for p in (Path(__file__).resolve().parents[1] / "vps" / "bin" / "transcribe_worker.py",
+                           Path(__file__).resolve().parents[1] / "bin" / "transcribe_worker.py")
+               if p.exists())
+_src = _worker.read_text(encoding="utf-8")
+check("воркер: best_of передається в transcribe()", "best_of=BEST_OF" in _src)
+check("воркер: best_of=1 за замовчуванням (стрибки RSS ×5 гіпотез на fallback)",
+      'os.getenv("WHISPER_BEST_OF", "1")' in _src)
+check("воркер: temperature=0 за замовчуванням і передається в transcribe()",
+      'os.getenv("WHISPER_TEMPERATURE", "0")' in _src and "temperature=TEMPERATURE" in _src)
+
+# --- drop_loops: петля T=0 з кліпу 27.09.2026 ----------------------------------
+import importlib.util  # noqa: E402
+
+_spec = importlib.util.spec_from_file_location("transcribe_worker", _worker)
+tw = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(tw)  # без faster_whisper: імпорт моделі — всередині main()
+
+LOOP = "І відповідно між цими вузлами прикладається гармонічний струм."
+clip_tail = [(592.3, "Ємність С, яка вмикається між вузлами А та вузлом В."),
+             (596.8, LOOP), (600.3, LOOP), (602.3, LOOP), (604.3, LOOP),
+             (606.3, LOOP), (608.3, LOOP), (610.3, LOOP)]
+got = tw.drop_loops(clip_tail, 600.0)
+check("drop_loops: петля за кінцем аудіо зрізана до одного сегмента",
+      got == clip_tail[:2], got)
+
+dictation = [(107.2, "То індуктивність віддає енергію."),
+             (109.6, "То індуктивність віддає енергію."),
+             (113.0, "Відповідно, миттєва потужність")]
+check("drop_loops: подвійне диктування лишається", tw.drop_loops(dictation, 600.0) == dictation)
+
+run = [(float(i), "a") for i in range(5)] + [(5.0, "b"), (6.0, "a")]
+check("drop_loops: серія >2 обрізається до 2, після перерви лічба з нуля",
+      tw.drop_loops(run, 100.0) == [(0.0, "a"), (1.0, "a"), (5.0, "b"), (6.0, "a")],
+      tw.drop_loops(run, 100.0))
+check("drop_loops: duration=0 не ріже нічого за часом",
+      tw.drop_loops([(700.0, "x")], 0) == [(700.0, "x")])
+
 print(f"\nпройдено {ok}/{ok + fail}")
 sys.exit(0 if fail == 0 else 1)
