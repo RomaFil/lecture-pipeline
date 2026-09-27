@@ -478,11 +478,27 @@ def process_one(db, video: Path):
     # див. classify.classify_voted() і "Стан на 09.09.2026" у lecture-pipeline.md)
     import classify as clf
     import timetable
-    # Розклад — підказка для розбіжних голосів, не правило (див. timetable.py).
+    # Календар «КПІ» — джерело правди для дисципліни (див. timetable.py).
+    # Свіже читання перед кожною класифікацією: Роман міг поправити пару сьогодні.
+    cal_status = timetable.refresh(force=True)
+    if cal_status.startswith("error"):
+        log.warning("календар не оновився, беру кеш: %s", cal_status)
     interval = recording_interval(video, rec_date, duration)
-    expected = timetable.expected_subjects(*interval) if interval else set()
-    res = clf.classify_voted(plain, expected=expected)
+    cal = {"code": None, "candidates": set(), "unknown": []}
+    try:
+        if interval:
+            cal = timetable.lookup(*interval)
+    except Exception as e:  # noqa: BLE001
+        log.warning("CALENDAR_ERROR: календар не прочитався, класифікую без нього: %s", e)
+    log.info("календар: %s | кандидати %s | %s", cal.get("code"), sorted(cal["candidates"]),
+             cal.get("summary", ""))
+    if cal.get("unknown"):
+        log.warning("у календарі пара з невідомою дисципліною: %s", cal["unknown"])
+    res = clf.classify_voted(plain, expected=cal["candidates"],
+                             calendar=cal if cal.get("code") else None)
     log.info("класифікатор: %s", json.dumps(res.get("raw", {}), ensure_ascii=False))
+    if res.get("raw", {}).get("calendar_note"):
+        log.info("CALENDAR: %s | запис: %s", res["raw"]["calendar_note"], video.name)
     hint = res.get("raw", {}).get("schedule_note")
     if hint:
         # Окремий рядок з ASCII-маркером: alert.sh (перевірка 15) рахує саме його.
@@ -664,6 +680,16 @@ def main():
         purge_archive(db)
     except Exception as e:  # noqa: BLE001
         log.warning("прибирання архіву не вдалося (не критично): %s", e)
+
+    # Календар оновлюється й у тихі дні (не частіше раз на 6 год): інакше без
+    # лекцій кеш старів би, і alert.sh кричав би про календар, що просто спав.
+    try:
+        import timetable
+        st = timetable.refresh()
+        if st != "fresh":
+            (log.warning if st.startswith("error") else log.info)("календар КПІ: %s", st)
+    except Exception as e:  # noqa: BLE001
+        log.warning("календар КПІ: збій оновлення (не критично): %s", e)
 
     files = candidates()
     if not files:

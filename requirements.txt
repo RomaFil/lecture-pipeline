@@ -8,3 +8,6 @@ faster-whisper>=1.2
 google-api-python-client>=2.190
 google-auth-oauthlib>=1.2
 requests>=2.32
+# календар «КПІ» (timetable.py): розбір iCal і розгортання повторюваних подій
+icalendar>=6
+recurring-ical-events>=3

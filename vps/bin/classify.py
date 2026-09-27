@@ -404,7 +404,57 @@ def _pick_kind(kinds: list, fallback: str) -> str:
     return top[0][0]
 
 
-def classify_voted(transcript: str, n: int = 5000, expected: set = None) -> dict:
+def _classify_by_calendar(parts: list, transcript: str, n: int, calendar: dict) -> dict:
+    """Календар визначає дисципліну, голоси LLM лише перевіряють (27.09.2026).
+
+    Переважити календар може тільки одностайність усіх трьох фрагментів — це
+    ймовірна заміна пари, якої немає в календарі, і такий запис іде на ручний
+    розбір. Одиночний фрагмент (короткий запис) календар не переважує ніколи:
+    саме так 26.09 одна відповідь моделі відправила ОТК у схемотехніку.
+    LLM потрібен і тут — він дає тему для заголовка.
+    """
+    code = calendar["code"]
+    if len(parts) == 1:
+        results = [classify(transcript, max_chars=n)["raw"]]
+    else:
+        results = [_request(SYSTEM, p, keep_alive=None if i == len(parts) - 1 else "30s")
+                   for i, p in enumerate(parts)]
+    votes = [str(d.get("subject", UNKNOWN)) for d in results]
+    topics_raw = [str(d.get("topic", "")) for d in results]
+    kinds = [str(d.get("kind", "невідомо")) for d in results]
+    win, count = _tally(votes)
+    base_raw = {"votes": votes, "subject": code, "confidence": f"календар, {votes.count(code)}/{len(votes)} голосів",
+                "topics": topics_raw, "results": results, "calendar": calendar.get("summary", ""),
+                "schedule": [code], "schedule_note": ""}
+
+    if len(votes) >= 3 and count == len(votes) and win != code and win in SUBJECTS:
+        note = (f"календар {code} ({calendar.get('summary', '')}), "
+                f"але голоси одностайно {win} {count}/{len(votes)}")
+        return {"ok": False, "reason": note, "raw": {**base_raw, "subject": None, "schedule_note": note}}
+
+    order = ([_pick_topic_index(votes, code)] if code in votes else []) + \
+            [i for i in range(len(votes)) if i != 0] + [0]
+    idx = next((i for i in order if _clean_topic(topics_raw[i])), None)
+    if idx is None:
+        return {"ok": False, "reason": f"календар {code}, але тема порожня в усіх фрагментах",
+                "raw": base_raw}
+
+    full, slug = SUBJECTS[code]
+    kind = calendar.get("kind") or _pick_kind(kinds, kinds[idx])
+    note = "" if all(v == code for v in votes) else f"календар {code} переважив голоси {votes}"
+    return {
+        "ok": True,
+        "subject": full,
+        "slug": slug,
+        "kind": kind,
+        "topic": _clean_topic(topics_raw[idx]),
+        "raw": {**base_raw, "kind": kind, "kinds": kinds, "winner_fragment": idx,
+                "calendar_note": note},
+    }
+
+
+def classify_voted(transcript: str, n: int = 5000, expected: set = None,
+                   calendar: dict = None) -> dict:
     """Класифікація голосуванням трьох фрагментів (початок / середина / кінець).
 
     Основний шлях конвеєра з 09.09.2026 — замінює одноразовий classify() у
@@ -434,8 +484,14 @@ def classify_voted(transcript: str, n: int = 5000, expected: set = None) -> dict
     для whisper'а) тригерив би ОКРЕМЕ завантаження 5.5 ГБ моделі — знайдено
     09.09.2026 при розборі стрибка CPU, що просадив WireGuard: три піки
     завантаження замість одного плюс стабільної генерації.
+
+    27.09.2026: якщо календар однозначно називає пару (`calendar["code"]`),
+    рішення ухвалює він — див. _classify_by_calendar(). `expected` (кілька
+    кандидатів із календаря) лишається підказкою для голосів, як і раніше.
     """
     parts = chunks(transcript, n)
+    if calendar and calendar.get("code") in SUBJECTS:
+        return _classify_by_calendar(parts, transcript, n, calendar)
     if len(parts) == 1:
         return _apply_schedule_single(classify(transcript, max_chars=n), expected or set())
 

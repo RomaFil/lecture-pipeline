@@ -119,6 +119,29 @@ fi
 check "$(grep -c 'Лекцій в обробці за добу: 0$' "$T/fired.log")" 1 \
     "лічильник на порожньому лозі — чистий '0' в кінці рядка"
 
+echo "=== 5. синк ПК у звіті: самолікування не робить звіт ⚠️ (27.09.2026) ==="
+
+pcstat() { printf '%s\n' "disk_free_gb=68" "disk_total_gb=237" "pending_count=$1" \
+    "task_timeouts_24h=$2" "task_failures_24h=$3" > "$T/state/pc-status.env"; }
+
+reset; pcstat 0 1 1
+FAKE_HOUR=9 bash "$T/bin/watchdog.sh"
+check "$(sent '✅ Конвеєр лекцій — добовий звіт')" 1 "1 таймліміт + 1 невдалий, у черзі 0 — звіт ✅"
+check "$(sent 'самолікувались')" 1 "…але рядок-довідка про синк є"
+
+reset; pcstat 1 1 0
+FAKE_HOUR=9 bash "$T/bin/watchdog.sh"
+check "$(sent 'є на що глянути')" 1 "таймліміт і файл досі на ПК — ⚠️"
+
+reset; pcstat 0 3 3
+FAKE_HOUR=9 bash "$T/bin/watchdog.sh"
+check "$(sent 'є на що глянути')" 1 "3 таймліміти (поріг сторожа) — ⚠️ навіть при черзі 0"
+
+reset; pcstat 0 0 0
+FAKE_HOUR=9 bash "$T/bin/watchdog.sh"
+check "$(sent 'Синк ПК:')" 0 "чиста доба — рядка про синк немає"
+rm -f "$T/state/pc-status.env"
+
 echo
 echo "ПІДСУМОК: пройдено $PASS, провалено $FAIL"
 [ "$FAIL" -eq 0 ]
