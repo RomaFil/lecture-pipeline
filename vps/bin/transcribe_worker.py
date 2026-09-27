@@ -12,6 +12,8 @@ import json
 import os
 import sys
 
+from faster_whisper import WhisperModel
+
 MODEL = os.getenv("WHISPER_MODEL", "large-v3")
 LANG = os.getenv("WHISPER_LANG", "uk")
 # Скільки ядер віддавати whisper. Без цього параметра faster-whisper бере ВСІ,
@@ -53,56 +55,19 @@ LANG = os.getenv("WHISPER_LANG", "uk")
 # 22.09.2026 і 26.09.2026.
 WHISPER_THREADS = int(os.getenv("WHISPER_THREADS", "2"))
 
-# best_of=1 (27.09.2026): при beam_size=1 дефолтний best_of=5 спрацьовував на
-# temperature fallback (тиша, шум, дошка) — faster-whisper декодував 5 гіпотез
-# разом, і кеш cross-attention large-v3 (~0.49 ГБ на гіпотезу) давав стрибки
-# RSS 2.9 → 5.1 ГБ на кілька хвилин. Два чанки нарізки в такому стрибку разом
-# доводили VPS до 228 МБ вільної RAM.
-BEST_OF = int(os.getenv("WHISPER_BEST_OF", "1"))
-
-# temperature=0 без fallback (27.09.2026). Сам по собі best_of=1 з дефолтним
-# списком температур дав сміття ("pengriminalitä", "ろуби"): коли всі температури
-# "провалились", бібліотека бере найкращого за logprob, і з однією гіпотезою це
-# шум T=1.0. Але й best_of=5 на T=1.0 галюцинує (на 10-хв кліпі 423-450с —
-# "До конца 해요 existenci."). Причина fallback тут — диктування і повтори
-# викладача: compression_ratio > 2.4 навіть у правильного тексту.
-# Замір на кліпі: T=0 — 0 сміттєвих сегментів, пік RSS 2.98 ГБ, 1.476х;
-# ціна — рідкісна петля жадібного декодування, яку ріже drop_loops() нижче.
-TEMPERATURE = [float(t) for t in os.getenv("WHISPER_TEMPERATURE", "0").split(",")]
-
-# Петля T=0 на хвості кліпу: 7 однакових сегментів по 2с, до 611.8с при аудіо 600с.
-# Двічі підряд — нормальне диктування ("То індуктивність віддає енергію." ×2).
-MAX_REPEATS = 2
-
-
-def drop_loops(segs, duration):
-    """segs — [(start, text)]. Прибирає сегменти за кінцем аудіо і хвости серій
-    однакових сусідніх сегментів довших за MAX_REPEATS."""
-    kept, run = [], 0
-    for start, text in segs:
-        if duration and start >= duration:
-            continue
-        run = run + 1 if kept and kept[-1][1] == text else 1
-        if run <= MAX_REPEATS:
-            kept.append((start, text))
-    return kept
-
 
 def main(wav: str, out: str) -> int:
-    from faster_whisper import WhisperModel  # тут, щоб тести імпортували drop_loops без моделі
-
     model = WhisperModel(MODEL, device="cpu", compute_type="int8",
                          cpu_threads=WHISPER_THREADS)
-    segments, info = model.transcribe(wav, language=LANG, vad_filter=True, beam_size=1,
-                                      best_of=BEST_OF, temperature=TEMPERATURE)
+    segments, info = model.transcribe(wav, language=LANG, vad_filter=True, beam_size=1)
 
-    segs = drop_loops([(s.start, s.text.strip()) for s in segments], info.duration)
     stamped, plain, raw = [], [], []
-    for start, text in segs:
-        m, sec = int(start) // 60, int(start) % 60
+    for s in segments:
+        m, sec = int(s.start) // 60, int(s.start) % 60
+        text = s.text.strip()
         stamped.append(f"[{m:02d}:{sec:02d}] {text}")
         plain.append(text)
-        raw.append({"start": start, "text": text})
+        raw.append({"start": s.start, "text": text})
 
     with open(out, "w", encoding="utf-8") as f:
         json.dump({
