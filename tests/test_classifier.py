@@ -84,13 +84,17 @@ EXPECTED = {
     # тема стала змістовною, видно в самому виводі тесту.
     "t10_long_intro.txt": ("АЯКС", "лекція"),
     "n1_negative_cook.txt": ("НЕВІДОМО", None),
-    "n2_negative_eng.txt": ("НЕВІДОМО", None),
+    # До 12.09.2026 англійська не була дисципліною, і ця фікстура була негативною.
+    # Відтоді АНГЛІЙСЬКА — окремий код, тож англомовне заняття має впізнаватись.
+    "n2_negative_eng.txt": ("АНГЛІЙСЬКА", None),
     # Негативний кейс саме під БОКС: спорт узагалі не став пропуском у список.
     # Без нього правило «спорт — це бокс» тихо ловило б будь-яке фізвиховання.
     "n3_negative_sport.txt": ("НЕВІДОМО", None),
 }
 
-fixtures = Path(sys.argv[1] if len(sys.argv) > 1 else "fixtures")
+# Відносно самого тесту, а не cwd: 27.09.2026 запуск з ~/lectures підхопив стару
+# копію ~/lectures/fixtures без 6 нових фікстур і впав на n3_negative_sport.txt.
+fixtures = Path(sys.argv[1]) if len(sys.argv) > 1 else Path(__file__).resolve().parent / "fixtures"
 print(f"модель: {clf.MODEL}\n")
 passed = 0
 for name, (want, want_kind) in sorted(EXPECTED.items()):

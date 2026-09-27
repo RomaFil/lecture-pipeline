@@ -103,5 +103,39 @@ check("merge_segment_data: порожній чанк не ламає злитт�
       merged3["segments"] == 2, merged3)
 
 
+# --- крутилки декодування воркера: дефолти = прод (27.09.2026) -----------------
+# Текстом, а не імпортом: воркер імпортує faster_whisper на рівні модуля.
+# Репо: ../vps/bin; на VPS тести лежать у ~/lectures/tests, код — у ~/lectures/bin.
+_worker = next(p for p in (Path(__file__).resolve().parents[1] / "vps" / "bin" / "transcribe_worker.py",
+                           Path(__file__).resolve().parents[1] / "bin" / "transcribe_worker.py")
+               if p.exists())
+_src = _worker.read_text(encoding="utf-8")
+# 27.09.2026: текстові перевірки нижче пройшли на воркері з SyntaxError (розірваний
+# "\n" після правки скриптом) — прод упав би на першій же лекції. Компіляція ловить.
+try:
+    compile(_src, str(_worker), "exec")
+    check("воркер: компілюється", True)
+except SyntaxError as e:
+    check("воркер: компілюється", False, e)
+_defaults = {"best_of": 'os.getenv("WHISPER_BEST_OF", "5")',
+             "compression_ratio_threshold": 'os.getenv("WHISPER_CR_THRESHOLD", "2.4")',
+             "condition_on_previous_text": 'os.getenv("WHISPER_CONDITION_PREV", "1") == "1"'}
+for _name, _text in _defaults.items():
+    check(f"воркер: дефолт {_name} без env = як у проді", _text in _src)
+for _arg in ("best_of=BEST_OF", "compression_ratio_threshold=CR_THRESHOLD",
+             "condition_on_previous_text=CONDITION_PREV"):
+    check(f"воркер: {_arg} передається в transcribe()", _arg in _src)
+try:  # на VPS бібліотека є — звіряємо з її справжніми дефолтами
+    import inspect
+    from faster_whisper import WhisperModel
+    _sig = inspect.signature(WhisperModel.transcribe).parameters
+    _lib = (_sig["best_of"].default, _sig["compression_ratio_threshold"].default,
+            _sig["condition_on_previous_text"].default)
+    check("faster-whisper: дефолти бібліотеки = дефолти воркера (5 / 2.4 / True)",
+          _lib == (5, 2.4, True), _lib)
+except ImportError:
+    print("SKIP faster-whisper не встановлено — звірка з бібліотекою лише на VPS")
+
+
 print(f"\nпройдено {ok}/{ok + fail}")
 sys.exit(0 if fail == 0 else 1)

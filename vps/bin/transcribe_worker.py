@@ -55,14 +55,31 @@ LANG = os.getenv("WHISPER_LANG", "uk")
 # 22.09.2026 і 26.09.2026.
 WHISPER_THREADS = int(os.getenv("WHISPER_THREADS", "2"))
 
+# Крутилки декодування (27.09.2026) для нічних замірів нарізки. Дефолти — рівно
+# дефолти faster-whisper 1.2.1, тобто прод без env поводиться як і досі.
+# Контекст: fallback температур (x best_of гіпотез у пам'яті) вмикався на
+# compression_ratio > 2.4, а диктування викладача дає 2.8-3.0 навіть у правильного
+# тексту; справжня петля — 5-9. Спроба best_of=1 + temperature=0 на повній лекції
+# загубила половину тексту в петлях — див. [[lecture-pipeline]], 27.09.2026.
+BEST_OF = int(os.getenv("WHISPER_BEST_OF", "5"))
+CR_THRESHOLD = float(os.getenv("WHISPER_CR_THRESHOLD", "2.4"))
+CONDITION_PREV = os.getenv("WHISPER_CONDITION_PREV", "1") == "1"
+# Лише для тестів: куди дописати рядок статистики (кількість fallback-сегментів).
+STATS_FILE = os.getenv("WHISPER_STATS_FILE", "")
+
 
 def main(wav: str, out: str) -> int:
     model = WhisperModel(MODEL, device="cpu", compute_type="int8",
                          cpu_threads=WHISPER_THREADS)
-    segments, info = model.transcribe(wav, language=LANG, vad_filter=True, beam_size=1)
+    segments, info = model.transcribe(wav, language=LANG, vad_filter=True, beam_size=1,
+                                      best_of=BEST_OF,
+                                      compression_ratio_threshold=CR_THRESHOLD,
+                                      condition_on_previous_text=CONDITION_PREV)
 
     stamped, plain, raw = [], [], []
+    fallback = 0
     for s in segments:
+        fallback += s.temperature > 0
         m, sec = int(s.start) // 60, int(s.start) % 60
         text = s.text.strip()
         stamped.append(f"[{m:02d}:{sec:02d}] {text}")
@@ -86,7 +103,13 @@ def main(wav: str, out: str) -> int:
             "model": MODEL,
         }, f, ensure_ascii=False)
     print(f"segments={len(stamped)} lang={info.language} "
-          f"p={info.language_probability:.2f} dur={info.duration:.0f}s", file=sys.stderr)
+          f"p={info.language_probability:.2f} dur={info.duration:.0f}s fallback={fallback}",
+          file=sys.stderr)
+    if STATS_FILE:
+        with open(STATS_FILE, "a", encoding="utf-8") as f:
+            f.write(json.dumps({"wav": wav, "segments": len(stamped), "fallback": fallback,
+                                "best_of": BEST_OF, "cr_threshold": CR_THRESHOLD,
+                                "condition_prev": CONDITION_PREV}) + "\n")
     return 0
 
 
