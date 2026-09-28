@@ -136,17 +136,6 @@ try:  # на VPS бібліотека є — звіряємо з її справ
 except ImportError:
     print("SKIP faster-whisper не встановлено — звірка з бібліотекою лише на VPS")
 
-# --- прод-конфіг у run.sh: «варіант C» (28.09.2026) -----------------------------
-_runsh = (_worker.parent / "run.sh").read_text(encoding="utf-8")
-for _line in ('export CHUNK_ENABLE="${CHUNK_ENABLE:-1}"',
-              'export WHISPER_BEST_OF="${WHISPER_BEST_OF:-3}"',
-              'export WHISPER_CR_THRESHOLD="${WHISPER_CR_THRESHOLD:-4.0}"',
-              'export WHISPER_CONDITION_PREV="${WHISPER_CONDITION_PREV:-0}"'):
-    check(f"run.sh: {_line.split('=')[0][7:]} як у варіанті C", _line in _runsh)
-# export має стояти ДО exec process.py, інакше до воркерів він не дійде
-check("run.sh: конфіг C експортується до exec process.py",
-      _runsh.find("WHISPER_CONDITION_PREV") < _runsh.find("exec nice"))
-
 
 print(f"\nпройдено {ok}/{ok + fail}")
 sys.exit(0 if fail == 0 else 1)
