@@ -119,20 +119,21 @@ except SyntaxError as e:
     check("воркер: компілюється", False, e)
 _defaults = {"best_of": 'os.getenv("WHISPER_BEST_OF", "5")',
              "compression_ratio_threshold": 'os.getenv("WHISPER_CR_THRESHOLD", "2.4")',
-             "condition_on_previous_text": 'os.getenv("WHISPER_CONDITION_PREV", "1") == "1"'}
+             "condition_on_previous_text": 'os.getenv("WHISPER_CONDITION_PREV", "1") == "1"',
+             "no_speech_threshold": 'os.getenv("WHISPER_NO_SPEECH_THRESHOLD", "0.6")'}
 for _name, _text in _defaults.items():
     check(f"воркер: дефолт {_name} без env = як у проді", _text in _src)
 for _arg in ("best_of=BEST_OF", "compression_ratio_threshold=CR_THRESHOLD",
-             "condition_on_previous_text=CONDITION_PREV"):
+             "condition_on_previous_text=CONDITION_PREV", "no_speech_threshold=NO_SPEECH_THRESHOLD"):
     check(f"воркер: {_arg} передається в transcribe()", _arg in _src)
 try:  # на VPS бібліотека є — звіряємо з її справжніми дефолтами
     import inspect
     from faster_whisper import WhisperModel
     _sig = inspect.signature(WhisperModel.transcribe).parameters
     _lib = (_sig["best_of"].default, _sig["compression_ratio_threshold"].default,
-            _sig["condition_on_previous_text"].default)
-    check("faster-whisper: дефолти бібліотеки = дефолти воркера (5 / 2.4 / True)",
-          _lib == (5, 2.4, True), _lib)
+            _sig["condition_on_previous_text"].default, _sig["no_speech_threshold"].default)
+    check("faster-whisper: дефолти бібліотеки = дефолти воркера (5 / 2.4 / True / 0.6)",
+          _lib == (5, 2.4, True, 0.6), _lib)
 except ImportError:
     print("SKIP faster-whisper не встановлено — звірка з бібліотекою лише на VPS")
 

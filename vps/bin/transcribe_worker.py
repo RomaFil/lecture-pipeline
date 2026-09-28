@@ -64,6 +64,11 @@ WHISPER_THREADS = int(os.getenv("WHISPER_THREADS", "2"))
 BEST_OF = int(os.getenv("WHISPER_BEST_OF", "5"))
 CR_THRESHOLD = float(os.getenv("WHISPER_CR_THRESHOLD", "2.4"))
 CONDITION_PREV = os.getenv("WHISPER_CONDITION_PREV", "1") == "1"
+# Пропуск «тиші»: вікно викидається, якщо no_speech_prob > порогу І avg_logprob < -1.
+# 28.09.2026: з CONDITION_PREV=0 це викидало цілі 30-с вікна мовлення (51 вікно на
+# 5 лекціях проти 8 у старого режиму). "none" — вимкнути (тишу й так ріже VAD).
+_ns = os.getenv("WHISPER_NO_SPEECH_THRESHOLD", "0.6")
+NO_SPEECH_THRESHOLD = None if _ns.lower() == "none" else float(_ns)
 # Лише для тестів: куди дописати рядок статистики (кількість fallback-сегментів).
 STATS_FILE = os.getenv("WHISPER_STATS_FILE", "")
 
@@ -74,7 +79,8 @@ def main(wav: str, out: str) -> int:
     segments, info = model.transcribe(wav, language=LANG, vad_filter=True, beam_size=1,
                                       best_of=BEST_OF,
                                       compression_ratio_threshold=CR_THRESHOLD,
-                                      condition_on_previous_text=CONDITION_PREV)
+                                      condition_on_previous_text=CONDITION_PREV,
+                                      no_speech_threshold=NO_SPEECH_THRESHOLD)
 
     stamped, plain, raw = [], [], []
     fallback = 0
@@ -109,7 +115,8 @@ def main(wav: str, out: str) -> int:
         with open(STATS_FILE, "a", encoding="utf-8") as f:
             f.write(json.dumps({"wav": wav, "segments": len(stamped), "fallback": fallback,
                                 "best_of": BEST_OF, "cr_threshold": CR_THRESHOLD,
-                                "condition_prev": CONDITION_PREV}) + "\n")
+                                "condition_prev": CONDITION_PREV,
+                                "no_speech_threshold": NO_SPEECH_THRESHOLD}) + "\n")
     return 0
 
 
