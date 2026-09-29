@@ -468,5 +468,76 @@ check("verify(): відео не знайдено — є пояснення в i
 # (`if __name__ == "__main__"`) і так не ділить стан з нічим іншим.
 
 
+# --- контроль якості транскрипту (29.09.2026) --------------------------------
+import logging  # noqa: E402
+
+_src_po = inspect.getsource(process.process_one)
+check("process_one: якість оцінюється ДО видалення wav (інакше звук нема з чим звірити)",
+      0 < _src_po.find("check_quality(") < _src_po.find("wav.unlink()"))
+check("process_one: якість іде в метадані транскрипту", '"якість":' in _src_po)
+check("check_quality логує маркер QUALITY_WARN: — його рахує alert.sh (перевірка 17)",
+      "QUALITY_WARN:" in inspect.getsource(process.check_quality))
+check("alert.sh шукає той самий маркер QUALITY_WARN:",
+      _alert is not None and "grep -c 'QUALITY_WARN:'" in _alert.read_text(encoding="utf-8"),
+      str(_alert))
+
+
+class _Cap(logging.Handler):
+    def __init__(self):
+        super().__init__()
+        self.lines = []
+
+    def emit(self, r):
+        self.lines.append(f"{r.levelname} {r.getMessage()}")
+
+
+_cap = _Cap()
+process.log.addHandler(_cap)
+_orig_ds = process.transcript_quality.detect_silences
+_good = "\n".join(f"[{s // 60:02d}:{s % 60:02d}] речення номер {s} про струм і напругу в колі"
+                  for s in range(0, 600, 5))
+_hole = "\n".join(l for l in _good.splitlines() if not ("[02:" <= l[:4] <= "[06:"))
+
+process.transcript_quality.detect_silences = lambda wav, d: []  # звук є всюди
+_r = process.check_quality(_good, {"duration": 600.0, "fallback": 0}, Path("/x.wav"), "a.mkv")
+check("check_quality: чистий транскрипт -> 'ok …', без QUALITY_WARN",
+      _r.startswith("ok") and not any("QUALITY_WARN" in l for l in _cap.lines), (_r, _cap.lines))
+
+_cap.lines.clear()
+_r = process.check_quality(_hole, {"duration": 600.0}, Path("/x.wav"), "b.mkv")
+_w = [l for l in _cap.lines if "QUALITY_WARN:" in l]
+check("check_quality: дірка -> '⚠ …' і WARNING QUALITY_WARN з імʼям запису",
+      _r.startswith("⚠") and len(_w) == 1 and _w[0].startswith("WARNING") and "b.mkv" in _w[0],
+      (_r, _cap.lines))
+
+
+def _boom(wav, d):
+    raise RuntimeError("ffmpeg зник")
+
+
+process.transcript_quality.detect_silences = _boom
+_cap.lines.clear()
+try:
+    _r = process.check_quality(_good, {"duration": 600.0}, Path("/x.wav"), "c.mkv")
+    check("check_quality: збій оцінки не валить обробку -> 'не оцінено'", _r == "не оцінено", _r)
+except Exception as e:  # noqa: BLE001
+    check("check_quality: збій оцінки не валить обробку -> 'не оцінено'", False, e)
+check("check_quality: збій оцінки — WARNING, не ERROR (перевірка 4 не кричить)",
+      _cap.lines and all(l.startswith("WARNING") for l in _cap.lines), _cap.lines)
+process.transcript_quality.detect_silences = _orig_ds
+process.log.removeHandler(_cap)
+
+_dst = Path(TMP) / "q" / "t.md"
+process.write_transcript(_dst, "T", {"якість": __import__("json").dumps(
+    "⚠ дірки 02:00-07:00 (5 хв зі звуком без тексту); петлі 05:00×6", ensure_ascii=False)}, "x")
+try:
+    import yaml  # noqa: E402
+    _fm = yaml.safe_load(_dst.read_text(encoding="utf-8").split("---")[1])
+    check("метадані з двокрапками в «якість» — валідний YAML",
+          _fm["якість"].startswith("⚠ дірки 02:00-07:00"), _fm)
+except ImportError:
+    print("SKIP pyyaml нема — YAML-перевірка метаданих пропущена")
+
+
 print(f"\nпройдено {ok}/{ok + fail}")
 sys.exit(0 if fail == 0 else 1)

@@ -79,6 +79,10 @@ chunk_b = {
 merged = ct.merge_segment_data([chunk_a, chunk_b], [0.0, 300.0])
 
 check("merge_segment_data: сума segments", merged["segments"] == 3, merged["segments"])
+_fb = ct.merge_segment_data([{**chunk_a, "fallback": 2}, {**chunk_b, "fallback": 5}], [0.0, 300.0])
+check("merge_segment_data: fallback сумується (для QUALITY)", _fb["fallback"] == 7, _fb.get("fallback"))
+check("merge_segment_data: чанки без fallback (старий воркер) -> 0", merged["fallback"] == 0,
+      merged.get("fallback"))
 check("merge_segment_data: сума duration", merged["duration"] == 600.0, merged["duration"])
 check("merge_segment_data: перший таймкод шматка A не зсунутий",
       merged["stamped"].splitlines()[0] == "[00:00] Перше речення.", merged["stamped"])
@@ -123,9 +127,17 @@ _defaults = {"best_of": 'os.getenv("WHISPER_BEST_OF", "5")',
              "no_speech_threshold": 'os.getenv("WHISPER_NO_SPEECH_THRESHOLD", "0.6")'}
 for _name, _text in _defaults.items():
     check(f"воркер: дефолт {_name} без env = як у проді", _text in _src)
+check("воркер: fallback пишеться в JSON-результат", '"fallback": int(fallback)' in _src)
 for _arg in ("best_of=BEST_OF", "compression_ratio_threshold=CR_THRESHOLD",
              "condition_on_previous_text=CONDITION_PREV", "no_speech_threshold=NO_SPEECH_THRESHOLD"):
     check(f"воркер: {_arg} передається в transcribe()", _arg in _src)
+# обидві гілки (звичайна й пакетна) отримують ті самі крутилки через **kw
+check("воркер: звичайна гілка transcribe(wav, **kw)", "model.transcribe(wav, **kw)" in _src)
+check("воркер: пакетна гілка отримує той самий **kw",
+      ".transcribe(wav, batch_size=BATCH, **kw)" in _src)
+check("воркер: пакетний режим вимкнений без env (прод)", 'os.getenv("WHISPER_BATCH", "0")' in _src)
+check("run.sh: WHISPER_BATCH у проді не вмикається", "WHISPER_BATCH" not in
+      (_worker.parent / "run.sh").read_text(encoding="utf-8"))
 try:  # на VPS бібліотека є — звіряємо з її справжніми дефолтами
     import inspect
     from faster_whisper import WhisperModel

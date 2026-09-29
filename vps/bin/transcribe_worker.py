@@ -69,6 +69,12 @@ CONDITION_PREV = os.getenv("WHISPER_CONDITION_PREV", "1") == "1"
 # 5 лекціях проти 8 у старого режиму). "none" — вимкнути (тишу й так ріже VAD).
 _ns = os.getenv("WHISPER_NO_SPEECH_THRESHOLD", "0.6")
 NO_SPEECH_THRESHOLD = None if _ns.lower() == "none" else float(_ns)
+# Пакетний режим faster-whisper (BatchedInferencePipeline), 29.09.2026 — ЛИШЕ для
+# нічного експерименту, у проді 0 (вимкнено). Там кожен VAD-шматок мовлення (≤30 с)
+# декодується окремо і повністю, тож немає «перестрибування» решти 30-с вікна, яким
+# режим E губить ~1% тексту. Ціна: лише T=0 (fallback бібліотека тут не робить),
+# петля лишається в межах свого шматка. Значення — batch_size.
+BATCH = int(os.getenv("WHISPER_BATCH", "0"))
 # Лише для тестів: куди дописати рядок статистики (кількість fallback-сегментів).
 STATS_FILE = os.getenv("WHISPER_STATS_FILE", "")
 
@@ -76,11 +82,16 @@ STATS_FILE = os.getenv("WHISPER_STATS_FILE", "")
 def main(wav: str, out: str) -> int:
     model = WhisperModel(MODEL, device="cpu", compute_type="int8",
                          cpu_threads=WHISPER_THREADS)
-    segments, info = model.transcribe(wav, language=LANG, vad_filter=True, beam_size=1,
-                                      best_of=BEST_OF,
-                                      compression_ratio_threshold=CR_THRESHOLD,
-                                      condition_on_previous_text=CONDITION_PREV,
-                                      no_speech_threshold=NO_SPEECH_THRESHOLD)
+    kw = dict(language=LANG, vad_filter=True, beam_size=1,
+              best_of=BEST_OF,
+              compression_ratio_threshold=CR_THRESHOLD,
+              condition_on_previous_text=CONDITION_PREV,
+              no_speech_threshold=NO_SPEECH_THRESHOLD)
+    if BATCH > 0:
+        from faster_whisper import BatchedInferencePipeline
+        segments, info = BatchedInferencePipeline(model).transcribe(wav, batch_size=BATCH, **kw)
+    else:
+        segments, info = model.transcribe(wav, **kw)
 
     stamped, plain, raw = [], [], []
     fallback = 0
@@ -103,6 +114,9 @@ def main(wav: str, out: str) -> int:
             # наявний контракт (stamped/plain/segments/…) не змінився.
             "raw_segments": raw,
             "segments": len(stamped),
+            # 29.09.2026: скільки сегментів пройшли через temperature fallback —
+            # для QUALITY-рядка в process.log (transcript_quality.py). Адитивне.
+            "fallback": int(fallback),
             "language": info.language,
             "language_probability": round(info.language_probability, 3),
             "duration": round(info.duration, 1),
@@ -116,7 +130,8 @@ def main(wav: str, out: str) -> int:
             f.write(json.dumps({"wav": wav, "segments": len(stamped), "fallback": fallback,
                                 "best_of": BEST_OF, "cr_threshold": CR_THRESHOLD,
                                 "condition_prev": CONDITION_PREV,
-                                "no_speech_threshold": NO_SPEECH_THRESHOLD}) + "\n")
+                                "no_speech_threshold": NO_SPEECH_THRESHOLD,
+                                "batch": BATCH}) + "\n")
     return 0
 
 

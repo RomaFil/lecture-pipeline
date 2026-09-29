@@ -314,6 +314,32 @@ reset; "$T/bin/alert.sh" >/dev/null 2>&1
 printf '%s\n' "2026-09-22 10:30:00,000 WARNING 2026-09-22 08-45-00.mkv: UNRECOGNIZED (голоси розійшлися)" >> "$T/logs/process.log"
                                            H=12 D=3 run "15. звичайний WARNING без маркера не рахується" SILENT schedule_hint
 
+echo "=== перевірка 17: транскрипт з вадами (QUALITY_WARN) ==="
+Q1='WARNING QUALITY_WARN: дірки 07:00-30:00 (23 хв зі звуком без тексту) | запис: 2026-09-29 14-15-00.mkv'
+Q2='WARNING QUALITY_WARN: петлі 11:12×9 | запис: 2026-09-30 10-25-00.mkv'
+reset; "$T/bin/alert.sh" >/dev/null 2>&1
+cnt=$(cat "$T/state/alerts/quality_warn.count")
+if [ "$cnt" = "0" ]; then pass=$((pass+1)); echo "  OK   17. база на порожньому лозі — один рядок 0"
+else fail=$((fail+1)); echo "  FAIL 17. база зіпсована: [$cnt]"; fi
+reset; printf '%s\n' "2026-09-01 10:00:00,000 $Q1" >> "$T/logs/process.log"
+                                           H=12 D=3 run "17. історичний рядок на першому запуску — мовчить" SILENT quality_warn
+printf '%s\n' "2026-09-29 16:30:00,000 $Q1" >> "$T/logs/process.log"
+                                           H=12 D=3 run "17. нова подія QUALITY_WARN — кричить" FIRE quality_warn
+                                           H=12 D=3 run "17. штамп знято, коли нових подій немає" SILENT quality_warn
+printf '%s\n' "2026-09-30 12:30:00,000 $Q2" >> "$T/logs/process.log"
+FAKE_HOUR=12 FAKE_DOW=3 "$T/bin/alert.sh" >/dev/null 2>&1
+sent=$(grep -c 'транскрипт з вадами' "$T/fired.log" 2>/dev/null || true)
+[[ "$sent" =~ ^[0-9]+$ ]] || sent=0
+if [ "$sent" -eq 2 ]; then pass=$((pass+1)); echo "  OK   17. друга подія ДОЛЕТІЛА, не з'їдена кулдауном  SENT=2"
+else fail=$((fail+1)); echo "  FAIL 17. друга подія: очікував SENT=2, отримав SENT=$sent"; fi
+if grep -q 'петлі 11:12×9 | запис: 2026-09-30 10-25-00.mkv' "$T/full.log"; then
+  pass=$((pass+1)); echo "  OK   17. повідомлення містить ваду й імʼя запису"
+else fail=$((fail+1)); echo "  FAIL 17. у повідомленні немає вади чи імені запису"; fi
+reset; "$T/bin/alert.sh" >/dev/null 2>&1
+printf '%s\n' "2026-09-29 16:30:00,000 INFO QUALITY: {\"words\": 9000, \"hole_minutes\": 0}" >> "$T/logs/process.log"
+printf '%s\n' "2026-09-29 16:30:00,000 WARNING QUALITY: оцінка не вдалась, обробка йде далі: x" >> "$T/logs/process.log"
+                                           H=12 D=3 run "17. звичайний QUALITY-рядок і збій оцінки не рахуються" SILENT quality_warn
+
 echo "=== здоровий стан ==="
 reset
 FAKE_HOUR=12 FAKE_DOW=3 "$T/bin/alert.sh" >/dev/null 2>&1

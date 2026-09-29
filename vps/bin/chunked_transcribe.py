@@ -98,6 +98,7 @@ def merge_segment_data(chunk_datas: list[dict], offsets: list[float]) -> dict:
         "stamped": "\n".join(stamped_lines),
         "plain": " ".join(plain_parts),
         "segments": total_segments,
+        "fallback": sum(d.get("fallback", 0) for d in chunk_datas),
         "language": longest.get("language"),
         "language_probability": longest.get("language_probability"),
         "duration": sum(d.get("duration", 0) for d in chunk_datas),

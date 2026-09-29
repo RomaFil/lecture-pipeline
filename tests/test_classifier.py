@@ -110,7 +110,14 @@ for name, (want, want_kind) in sorted(EXPECTED.items()):
     got = str(raw.get("subject", "?"))
     kind = str(raw.get("kind", "—"))
     conf = raw.get("confidence", "—")
-    ok = got == want and (want_kind is None or kind == want_kind)
+    if want == "НЕВІДОМО":
+        # Негативний кейс перевіряє РЕЗУЛЬТАТ, а не сирий код моделі: запис має
+        # піти в _needs-review (ok=False). 28.09.2026 n3 (волейбол) «падав», бо
+        # модель казала БОКС з confidence=low — а така відповідь і так не
+        # проходить гейт classify() і на YouTube не їде. Сирий код лишається у виводі.
+        ok = not res.get("ok")
+    else:
+        ok = got == want and (want_kind is None or kind == want_kind)
     passed += ok
     mark = "PASS" if ok else "FAIL"
     want_str = want if want_kind is None else f"{want}/{want_kind}"

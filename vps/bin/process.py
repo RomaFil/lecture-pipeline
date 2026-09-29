@@ -119,6 +119,7 @@ sys.path.insert(0, str(BASE / "bin"))
 # міг спіймати yt_upload.QuotaExceeded окремо від решти помилок.
 import yt_upload  # noqa: E402
 import chunked_transcribe  # noqa: E402
+import transcript_quality  # noqa: E402
 
 for d in (INCOMING, OUTGOING, WORK, ARCHIVE, REVIEW, LOGS):
     d.mkdir(parents=True, exist_ok=True)
@@ -286,6 +287,28 @@ def transcribe(wav: Path, duration: float = 0.0) -> dict:
              data["segments"], data["duration"], data["language"],
              data["language_probability"], time.time() - t0)
     return data
+
+
+def check_quality(stamped: str, tr: dict, wav: Path, name: str) -> str:
+    """Контроль якості транскрипту (transcript_quality.py) — лише сигнал.
+
+    Навіщо: 27-29.09.2026 зміни декодування двічі тихо псували текст (половина
+    лекції зникла в петлях, сотні повторених рядків), і жоден алерт цього не
+    бачив. Маркер QUALITY_WARN рахує alert.sh (перевірка 17). Будь-яка помилка
+    тут не має зупиняти обробку — запис без оцінки кращий, ніж запис у черзі.
+    """
+    try:
+        q = transcript_quality.assess(
+            stamped, tr["duration"],
+            transcript_quality.detect_silences(wav, tr["duration"]), tr.get("fallback"))
+        log.info("QUALITY: %s", json.dumps(
+            {k: v for k, v in q.items() if k != "warnings"}, ensure_ascii=False))
+        if q["warnings"]:
+            log.warning("QUALITY_WARN: %s | запис: %s", "; ".join(q["warnings"]), name)
+        return transcript_quality.summary(q)
+    except Exception as e:  # noqa: BLE001
+        log.warning("QUALITY: оцінка не вдалась, обробка йде далі: %s", e)
+        return "не оцінено"
 
 
 # ----------------------------------------------------------------------- output
@@ -462,6 +485,7 @@ def process_one(db, video: Path):
     # 2. транскрипція
     tr = transcribe(wav, duration)
     stamped, plain = tr["stamped"], tr["plain"]
+    quality = check_quality(stamped, tr, wav, video.name)
     wav.unlink()  # wav більше не потрібен — транскрипт уже на диску
     # Поріг ловить лише справді провальний запис (тиша, збитий кодек, нема доріжки).
     # Ставити його високо не можна: коротка пара чи тестовий кліп дають мало тексту
@@ -596,6 +620,8 @@ def process_one(db, video: Path):
         "плейліст": playlist_url or "—",
         "джерело": video.name,
         "sha256": sha,
+        # у лапках: у попередженнях бувають двокрапки й «⚠», YAML не має спіткнутись
+        "якість": json.dumps(quality, ensure_ascii=False),
     }, stamped)
     log.info("транскрипт: %s", dest)
 
