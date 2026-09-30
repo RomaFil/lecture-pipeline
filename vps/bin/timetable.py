@@ -13,11 +13,13 @@ VPS читає календар через секретну iCal-адресу (s
 Пара = подія, назва якої закінчується на «(КПІ)»: у тому ж календарі живуть
 чекіни, дедлайни й вебінари, причому з тим самим кольором.
 
-30.09.2026: друге джерело — календар «AJAX Intership» (secrets/ajax_calendar.url,
-кеш state/ajax_calendar.ics). Ajax у календарі КПІ немає, тож 29.09 заняття про
-Altium вирішувала сама LLM і записала його в Матаналіз (інцидент 021). У календарі
-Ajax живуть лише заняття стажування («Ajax Embedded — <тема>», «AJAX LAB»), тому
-КОЖНА подія з часом там = АЯКС, суфікс не потрібен. Тип заняття вирішує LLM.
+30.09.2026: Ajax у календарі КПІ немає, тож 29.09 заняття про Altium вирішувала
+сама LLM і записала його в Матаналіз (інцидент 021). Тепер для Ajax два джерела:
+фіксований слот вт/чт 17:00 (AJAX_WEEKDAYS, працює без жодних налаштувань) і,
+опційно, календар «AJAX Intership» (secrets/ajax_calendar.url, кеш
+state/ajax_calendar.ics) для разових подій. У тому календарі живуть лише заняття
+стажування («Ajax Embedded — <тема>», «AJAX LAB»), тому КОЖНА подія з часом там =
+АЯКС, суфікс не потрібен. Тип заняття вирішує LLM.
 """
 import os
 import sys
@@ -33,6 +35,15 @@ CACHE = HOME / "state" / "kpi_calendar.ics"
 AJAX_URL_FILE = HOME / "secrets" / "ajax_calendar.url"
 AJAX_CACHE = HOME / "state" / "ajax_calendar.ics"
 AJAX_CODE = "АЯКС"
+# Фіксований слот Ajax (Роман, 30.09.2026): вівторок і четвер о 17:00, стабільно,
+# не переноситься й не чергується. Тому розклад Ajax працює і БЕЗ секретної адреси
+# календаря; календар (якщо колись з'явиться) лише додає разові події на кшталт
+# «AJAX LAB» (відпрацювання). Поза [AJAX_FROM, AJAX_UNTIL] слот не діє — коли
+# стажування закінчиться, вт/чт 17:00 знову вирішуватиме LLM. Продовжити дату,
+# якщо стажування триває довше.
+AJAX_WEEKDAYS = (1, 3)             # вт, чт (Monday = 0)
+AJAX_SLOT = ((17, 0), (20, 0))
+AJAX_FROM, AJAX_UNTIL = date(2026, 9, 8), date(2026, 12, 31)
 TZ = ZoneInfo("Europe/Kyiv")
 
 SUFFIX = "(КПІ)"
@@ -113,8 +124,23 @@ def events_between(start: datetime, end: datetime, path: Path = CACHE,
     return out
 
 
+def ajax_weekly(start: datetime, end: datetime) -> list:
+    """Події фіксованого слоту Ajax (вт/чт 17:00-20:00), що зачіпають [start, end]."""
+    out = []
+    d = start.date() - timedelta(days=1)
+    while d <= end.date() + timedelta(days=1):
+        if d.weekday() in AJAX_WEEKDAYS and AJAX_FROM <= d <= AJAX_UNTIL:
+            (h1, m1), (h2, m2) = AJAX_SLOT
+            out.append({"start": datetime(d.year, d.month, d.day, h1, m1),
+                        "end": datetime(d.year, d.month, d.day, h2, m2),
+                        "summary": "Ajax Embedded — фіксований слот вт/чт 17:00",
+                        "name": "Ajax Embedded", "code": AJAX_CODE, "kind": None, "location": ""})
+        d += timedelta(days=1)
+    return out
+
+
 def lookup(start: datetime, end: datetime, path: Path = CACHE,
-           ajax_path: Path = None) -> dict:
+           ajax_path: Path = None, ajax_slot: bool = True) -> dict:
     """Що за календарем ішло під час запису [start, end] (локальний час, без tz).
 
     {"code": код | None, "kind": тип | None, "candidates": set кодів,
@@ -124,8 +150,9 @@ def lookup(start: datetime, end: datetime, path: Path = CACHE,
     інакше candidates — список, з якого обирають голоси LLM. Порожні
     candidates = календар цього часу не знає (тренування, відпрацювання).
 
-    ajax_path — кеш календаря Ajax (None = AJAX_CACHE). Його події змагаються
-    з парами КПІ за тими самими правилами перетину й домінування.
+    ajax_path — кеш календаря Ajax (None = AJAX_CACHE), ajax_slot — фіксований
+    слот вт/чт 17:00. Їхні події змагаються з парами КПІ за тими самими правилами
+    перетину й домінування.
     """
     res = {"code": None, "kind": None, "candidates": set(), "summary": "", "unknown": []}
     ajax_path = AJAX_CACHE if ajax_path is None else ajax_path
@@ -134,6 +161,8 @@ def lookup(start: datetime, end: datetime, path: Path = CACHE,
     events = events_between(start, end, path) if path.exists() else []
     if ajax_path.exists():
         events += events_between(start, end, ajax_path, whole_code=AJAX_CODE)
+    if ajax_slot:
+        events += ajax_weekly(start, end)
     length = (end - start).total_seconds() / 60
     best = {}
     for ev in events:
