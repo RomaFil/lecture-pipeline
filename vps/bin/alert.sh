@@ -63,6 +63,8 @@ PC_TIMEOUTS_MAX=3         # подій 329 за добу
 CAL_URL="$BASE/secrets/kpi_calendar.url"
 CAL_CACHE="$BASE/state/kpi_calendar.ics"
 CAL_STALE_H=48            # process.py оновлює кеш щонайменше раз на 6 год
+AJAX_CAL_URL="$BASE/secrets/ajax_calendar.url"     # з 30.09.2026, інцидент 021
+AJAX_CAL_CACHE="$BASE/state/ajax_calendar.ics"
 # Скільки онлайн-пар за календарем має бути записано сьогодні (перевірка 11).
 # Змінна середовища — щоб тест міг підставити число без мережі й Python.
 EXPECT_CMD="${LECTURE_EXPECT_CMD:-$BASE/venv/bin/python $BASE/bin/timetable.py expect}"
@@ -627,6 +629,25 @@ if [ -f "$CAL_URL" ]; then
             "Якщо «HTTP Error 404» — секретну адресу скинули, візьми нову в налаштуваннях календаря.")"
     else
         clear_alert calendar_stale
+    fi
+fi
+
+# --- 16a. Календар Ajax не оновлюється ---------------------------------------
+# Те саме для календаря «AJAX Intership» (30.09.2026): без нього заняття Ajax
+# знову класифікує лише модель — саме так 29.09 Altium поїхав у Матаналіз (021).
+if [ -f "$AJAX_CAL_URL" ]; then
+    if [ ! -f "$AJAX_CAL_CACHE" ] || [ -n "$(find "$AJAX_CAL_CACHE" -mmin +$(( CAL_STALE_H * 60 )) 2>/dev/null)" ]; then
+        last=$(grep 'календар Ajax: error\|календар Ajax не оновився' "$BASE/logs/process.log" 2>/dev/null | tail -1 | sed 's/^[0-9-]* [0-9:,]* [A-Z]* //')
+        fire calendar_ajax_stale "$(printf '%s\n' \
+            "⚠️ Конвеєр лекцій: календар Ajax не оновлюється" \
+            "" \
+            "Кеш старший за $CAL_STALE_H год (або його немає). Заняття Ajax зараз визначає лише модель." \
+            "Остання помилка: ${last:-немає в process.log}" \
+            "" \
+            "Перевірка: ~/lectures/venv/bin/python ~/lectures/bin/timetable.py refresh-ajax --force" \
+            "Якщо «HTTP Error 404» — секретну адресу скинули, візьми нову в налаштуваннях календаря «AJAX Intership».")"
+    else
+        clear_alert calendar_ajax_stale
     fi
 fi
 

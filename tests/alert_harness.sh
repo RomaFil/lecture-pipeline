@@ -85,7 +85,8 @@ ulog() { ulograw "$(/bin/date '+%F %T') $1"; }
 reset() {
   rm -rf "$T/incoming"/* "$T/outgoing"/* "$T/archive"/* "$T/_needs-review"/* \
          "$T/state/alerts"/* "$T/fired.log" "$T/full.log" "$T/state/maintenance" \
-         "$T/secrets/kpi_calendar.url" "$T/state/kpi_calendar.ics" "$T/expect.arg" 2>/dev/null
+         "$T/secrets/kpi_calendar.url" "$T/state/kpi_calendar.ics" "$T/expect.arg" \
+         "$T/secrets/ajax_calendar.url" "$T/state/ajax_calendar.ics" 2>/dev/null
   : > "$T/logs/process.log"
   mkpc
   bk 6 vary 1
@@ -228,6 +229,12 @@ reset; touch "$T/secrets/kpi_calendar.url" "$T/state/kpi_calendar.ics"
 reset; touch "$T/secrets/kpi_calendar.url"; old '-50 hours' "$T/state/kpi_calendar.ics"
                                            H=12 D=3 run "16. кеш 50 год — кричить" FIRE calendar_stale
 touch "$T/state/kpi_calendar.ics";         H=12 D=3 run "16. кеш ожив — штамп знято" SILENT calendar_stale
+reset;                                     H=12 D=3 run "16a. календар Ajax не налаштований — мовчить" SILENT calendar_ajax_stale
+reset; touch "$T/secrets/ajax_calendar.url"; H=12 D=3 run "16a. адреса Ajax є, кешу немає — кричить" FIRE calendar_ajax_stale
+reset; touch "$T/secrets/ajax_calendar.url"; old '-50 hours' "$T/state/ajax_calendar.ics"
+                                           H=12 D=3 run "16a. кеш Ajax 50 год — кричить" FIRE calendar_ajax_stale
+touch "$T/state/ajax_calendar.ics";        H=12 D=3 run "16a. кеш Ajax ожив — штамп знято" SILENT calendar_ajax_stale
+reset; touch "$T/secrets/ajax_calendar.url"; H=12 D=3 run "16a. застарілий Ajax не будить алерт КПІ" SILENT calendar_stale
 
 echo "=== перевірка 12: бекап сховища ==="
 reset; bk 6 vary 1;   H=12 D=3 run "12. архіви свіжі й різні — мовчить" SILENT backup_stale

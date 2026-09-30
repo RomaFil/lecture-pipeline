@@ -507,6 +507,10 @@ def process_one(db, video: Path):
     cal_status = timetable.refresh(force=True)
     if cal_status.startswith("error"):
         log.warning("календар не оновився, беру кеш: %s", cal_status)
+    # Календар Ajax (30.09.2026, інцидент 021): заняття стажування в КПІ-календарі нема.
+    aj_status = timetable.refresh_ajax(force=True)
+    if aj_status.startswith("error"):
+        log.warning("календар Ajax не оновився, беру кеш: %s", aj_status)
     interval = recording_interval(video, rec_date, duration)
     cal = {"code": None, "candidates": set(), "unknown": []}
     try:
@@ -714,6 +718,9 @@ def main():
         st = timetable.refresh()
         if st != "fresh":
             (log.warning if st.startswith("error") else log.info)("календар КПІ: %s", st)
+        st = timetable.refresh_ajax()
+        if st not in ("fresh", "no-url"):
+            (log.warning if st.startswith("error") else log.info)("календар Ajax: %s", st)
     except Exception as e:  # noqa: BLE001
         log.warning("календар КПІ: збій оновлення (не критично): %s", e)
 

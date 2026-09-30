@@ -151,7 +151,8 @@ _d = datetime
 
 
 def lk(a, b):
-    return tt.lookup(a, b, CAL)
+    # ajax_path явно на неіснуючий файл: інакше тест на VPS підхопив би бойовий кеш Ajax
+    return tt.lookup(a, b, CAL, ajax_path=tmp / "no-ajax.ics")
 
 
 # --- назви подій --------------------------------------------------------------
@@ -236,6 +237,92 @@ tt.URL_FILE.write_text((tmp / "missing.ics").as_uri(), encoding="utf-8")
 st = tt.refresh(force=True)
 check("refresh: недоступна адреса → error без винятку", st.startswith("error"), st)
 tt.URL_FILE, tt.CACHE = _url, _cache
+
+# --- календар Ajax (30.09.2026, інцидент 021) -----------------------------------
+AJAX_ICS = """BEGIN:VCALENDAR
+VERSION:2.0
+PRODID:-//Google Inc//Google Calendar 70.9054//EN
+X-WR-CALNAME:AJAX Intership
+BEGIN:VTIMEZONE
+TZID:Europe/Kiev
+BEGIN:DAYLIGHT
+TZOFFSETFROM:+0200
+TZOFFSETTO:+0300
+TZNAME:EEST
+DTSTART:19700329T030000
+RRULE:FREQ=YEARLY;BYMONTH=3;BYDAY=-1SU
+END:DAYLIGHT
+BEGIN:STANDARD
+TZOFFSETFROM:+0300
+TZOFFSETTO:+0200
+TZNAME:EET
+DTSTART:19701025T040000
+RRULE:FREQ=YEARLY;BYMONTH=10;BYDAY=-1SU
+END:STANDARD
+END:VTIMEZONE
+BEGIN:VEVENT
+UID:ajax-weekly
+DTSTART;TZID=Europe/Kiev:20260908T170000
+DTEND;TZID=Europe/Kiev:20260908T200000
+RRULE:FREQ=WEEKLY;UNTIL=20261231T000000Z;BYDAY=TU,TH
+SUMMARY:Ajax Embedded — заняття (KAI-Ajax Lab)
+LOCATION:KAI-Ajax Lab\\, 3 корпус КАІ
+END:VEVENT
+BEGIN:VEVENT
+UID:ajax-weekly
+RECURRENCE-ID;TZID=Europe/Kiev:20260929T170000
+DTSTART;TZID=Europe/Kiev:20260929T170000
+DTEND;TZID=Europe/Kiev:20260929T200000
+SUMMARY:Ajax Embedded — Основи електроніки
+END:VEVENT
+BEGIN:VEVENT
+UID:ajax-weekly
+RECURRENCE-ID;TZID=Europe/Kiev:20261001T170000
+DTSTART;TZID=Europe/Kiev:20261001T170000
+DTEND;TZID=Europe/Kiev:20261001T200000
+STATUS:CANCELLED
+SUMMARY:Ajax Embedded — заняття (KAI-Ajax Lab)
+END:VEVENT
+BEGIN:VEVENT
+UID:ajax-lab-once
+DTSTART:20260928T100000Z
+DTEND:20260928T120000Z
+SUMMARY:AJAX LAB
+END:VEVENT
+END:VCALENDAR
+""".replace("\n", "\r\n")
+AJ =tmp / "ajax.ics"
+AJ.write_text(AJAX_ICS, encoding="utf-8")
+
+
+def lka(a, b, kpi=CAL):
+    return tt.lookup(a, b, kpi, ajax_path=AJ)
+
+
+r = lka(_d(2026, 9, 29, 16, 59), _d(2026, 9, 29, 19, 23))
+check("РЕГРЕСІЯ 021: вт 29.09 16:59 (Altium) → АЯКС за календарем Ajax",
+      r["code"] == "АЯКС" and r["kind"] is None and "Основи електроніки" in r["summary"], r)
+check("Ajax: чт 24.09 17:06 — звичайне повторення", lka(_d(2026, 9, 24, 17, 6), _d(2026, 9, 24, 19, 45))["code"] == "АЯКС")
+check("Ajax: подія з довільною назвою («AJAX LAB», пн 28.09 13:00) — теж АЯКС",
+      lka(_d(2026, 9, 28, 13, 5), _d(2026, 9, 28, 14, 50))["code"] == "АЯКС")
+check("Ajax: скасоване заняття 01.10 не рахується",
+      lka(_d(2026, 10, 1, 17, 0), _d(2026, 10, 1, 19, 0))["candidates"] == set())
+check("Ajax не заважає парам КПІ: 26.09 08:41 — ОТК-практика",
+      lka(_d(2026, 9, 26, 8, 41), _d(2026, 9, 26, 10, 24))["code"] == "ТЕОРІЯ_КІЛ")
+check("Ajax працює і без кешу КПІ", tt.lookup(_d(2026, 9, 29, 16, 59), _d(2026, 9, 29, 19, 23),
+                                             tmp / "nope.ics", ajax_path=AJ)["code"] == "АЯКС")
+check("кешу Ajax нема → як раніше (порожньо на вт 17:00)",
+      lk(_d(2026, 9, 29, 16, 59), _d(2026, 9, 29, 19, 23))["candidates"] == set())
+_au, _ac = tt.AJAX_URL_FILE, tt.AJAX_CACHE
+tt.AJAX_URL_FILE, tt.AJAX_CACHE = tmp / "secrets" / "ajax.url", tmp / "state" / "ajax_cache.ics"
+check("refresh_ajax: немає адреси → no-url (календар не налаштований — не збій)", tt.refresh_ajax() == "no-url")
+tt.AJAX_URL_FILE.parent.mkdir(exist_ok=True)
+tt.AJAX_URL_FILE.write_text(AJ.as_uri(), encoding="utf-8")
+check("refresh_ajax: успіх → updated, у свій кеш", tt.refresh_ajax() == "updated"
+      and b"AJAX Intership" in tt.AJAX_CACHE.read_bytes())
+check("refresh_ajax не чіпає кеш КПІ", not (tmp / "state" / "cache.ics").exists()
+      or b"AJAX" not in (tmp / "state" / "cache.ics").read_bytes())
+tt.AJAX_URL_FILE, tt.AJAX_CACHE = _au, _ac
 
 # --- класифікація за календарем -----------------------------------------------
 _TK, _SC = "ТЕОРІЯ_КІЛ", "СХЕМОТЕХНІКА"

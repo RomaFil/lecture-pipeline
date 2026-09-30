@@ -12,6 +12,12 @@ VPS читає календар через секретну iCal-адресу (s
 
 Пара = подія, назва якої закінчується на «(КПІ)»: у тому ж календарі живуть
 чекіни, дедлайни й вебінари, причому з тим самим кольором.
+
+30.09.2026: друге джерело — календар «AJAX Intership» (secrets/ajax_calendar.url,
+кеш state/ajax_calendar.ics). Ajax у календарі КПІ немає, тож 29.09 заняття про
+Altium вирішувала сама LLM і записала його в Матаналіз (інцидент 021). У календарі
+Ajax живуть лише заняття стажування («Ajax Embedded — <тема>», «AJAX LAB»), тому
+КОЖНА подія з часом там = АЯКС, суфікс не потрібен. Тип заняття вирішує LLM.
 """
 import os
 import sys
@@ -24,6 +30,9 @@ from zoneinfo import ZoneInfo
 HOME = Path(os.getenv("LECTURES_HOME", str(Path.home() / "lectures")))
 URL_FILE = HOME / "secrets" / "kpi_calendar.url"
 CACHE = HOME / "state" / "kpi_calendar.ics"
+AJAX_URL_FILE = HOME / "secrets" / "ajax_calendar.url"
+AJAX_CACHE = HOME / "state" / "ajax_calendar.ics"
+AJAX_CODE = "АЯКС"
 TZ = ZoneInfo("Europe/Kyiv")
 
 SUFFIX = "(КПІ)"
@@ -71,11 +80,14 @@ def _local(dt) -> datetime:
     return dt.astimezone(TZ).replace(tzinfo=None)
 
 
-def events_between(start: datetime, end: datetime, path: Path = CACHE) -> list:
+def events_between(start: datetime, end: datetime, path: Path = CACHE,
+                   whole_code: str = None) -> list:
     """Пари (події «(КПІ)») з кешу календаря, що хоч якось зачіпають [start, end].
 
     Повторювані події розгортаються з урахуванням винятків і перенесень
     (RRULE / EXDATE / RECURRENCE-ID). Цілоденні й скасовані — пропускаються.
+    whole_code — календар цілком належить одній дисципліні (Ajax): кожна подія з
+    часом — пара з цим кодом, незалежно від назви.
     """
     import icalendar
     import recurring_ical_events
@@ -86,7 +98,8 @@ def events_between(start: datetime, end: datetime, path: Path = CACHE) -> list:
     for ev in recurring_ical_events.of(cal).between(a - timedelta(hours=12), b + timedelta(hours=12)):
         if str(ev.get("STATUS", "")).upper() == "CANCELLED":
             continue
-        parsed = parse_title(str(ev.get("SUMMARY", "")))
+        summary = str(ev.get("SUMMARY", ""))
+        parsed = (summary, None) if whole_code else parse_title(summary)
         if not parsed:
             continue
         s = ev["DTSTART"].dt
@@ -94,13 +107,14 @@ def events_between(start: datetime, end: datetime, path: Path = CACHE) -> list:
             continue
         e = ev["DTEND"].dt if "DTEND" in ev else s + ev["DURATION"].dt
         name, kind = parsed
-        out.append({"start": _local(s), "end": _local(e), "summary": str(ev["SUMMARY"]),
-                    "name": name, "code": subject_code(name), "kind": kind,
+        out.append({"start": _local(s), "end": _local(e), "summary": summary,
+                    "name": name, "code": whole_code or subject_code(name), "kind": kind,
                     "location": str(ev.get("LOCATION", ""))})
     return out
 
 
-def lookup(start: datetime, end: datetime, path: Path = CACHE) -> dict:
+def lookup(start: datetime, end: datetime, path: Path = CACHE,
+           ajax_path: Path = None) -> dict:
     """Що за календарем ішло під час запису [start, end] (локальний час, без tz).
 
     {"code": код | None, "kind": тип | None, "candidates": set кодів,
@@ -108,14 +122,21 @@ def lookup(start: datetime, end: datetime, path: Path = CACHE) -> dict:
 
     code заповнений, лише коли одна дисципліна явно домінує (DOMINANCE);
     інакше candidates — список, з якого обирають голоси LLM. Порожні
-    candidates = календар цього часу не знає (Ajax, тренування, відпрацювання).
+    candidates = календар цього часу не знає (тренування, відпрацювання).
+
+    ajax_path — кеш календаря Ajax (None = AJAX_CACHE). Його події змагаються
+    з парами КПІ за тими самими правилами перетину й домінування.
     """
     res = {"code": None, "kind": None, "candidates": set(), "summary": "", "unknown": []}
-    if os.getenv("LECTURE_SCHEDULE_HINT", "1") == "0" or end <= start or not path.exists():
+    ajax_path = AJAX_CACHE if ajax_path is None else ajax_path
+    if os.getenv("LECTURE_SCHEDULE_HINT", "1") == "0" or end <= start:
         return res
+    events = events_between(start, end, path) if path.exists() else []
+    if ajax_path.exists():
+        events += events_between(start, end, ajax_path, whole_code=AJAX_CODE)
     length = (end - start).total_seconds() / 60
     best = {}
-    for ev in events_between(start, end, path):
+    for ev in events:
         overlap = (min(end, ev["end"]) - max(start, ev["start"])).total_seconds() / 60
         if not (overlap >= MIN_OVERLAP_MIN or (overlap > 0 and overlap >= MIN_OVERLAP_SHARE * length)):
             continue
@@ -151,36 +172,46 @@ def expected_recordings(day: date, path: Path = CACHE) -> int:
                and any(m in e["location"].lower() for m in ONLINE_MARKERS))
 
 
-def refresh(force: bool = False, timeout: int = 30) -> str:
+def refresh(force: bool = False, timeout: int = 30, url_file: Path = None,
+            cache: Path = None) -> str:
     """Оновлює кеш календаря. Повертає: updated | fresh | no-url | error: …
 
     Не кидає винятків: календар — підказка для класифікації, і його недоступність
     не має зупиняти обробку. Застарілий кеш ловить alert.sh.
+    Без url_file/cache — календар КПІ (глобальні читаються в момент виклику).
     """
-    if not URL_FILE.exists():
+    URL_FILE_, CACHE_ = url_file or URL_FILE, cache or CACHE
+    if not URL_FILE_.exists():
         return "no-url"
-    if not force and CACHE.exists() and time.time() - CACHE.stat().st_mtime < REFRESH_MAX_AGE_S:
+    if not force and CACHE_.exists() and time.time() - CACHE_.stat().st_mtime < REFRESH_MAX_AGE_S:
         return "fresh"
-    url = URL_FILE.read_text(encoding="utf-8").strip()
+    url = URL_FILE_.read_text(encoding="utf-8").strip()
     try:
         with urllib.request.urlopen(url, timeout=timeout) as r:
             data = r.read()
         if b"BEGIN:VCALENDAR" not in data[:500]:
             raise ValueError("відповідь не схожа на iCal")
-        CACHE.parent.mkdir(parents=True, exist_ok=True)
-        tmp = CACHE.with_suffix(".tmp")
+        CACHE_.parent.mkdir(parents=True, exist_ok=True)
+        tmp = CACHE_.with_suffix(".tmp")
         tmp.write_bytes(data)
         os.chmod(tmp, 0o600)
-        os.replace(tmp, CACHE)
+        os.replace(tmp, CACHE_)
         return "updated"
     except Exception as e:  # noqa: BLE001
         return f"error: {type(e).__name__}: {str(e).replace(url, '<url>')}"
+
+
+def refresh_ajax(force: bool = False, timeout: int = 30) -> str:
+    """Те саме для календаря «AJAX Intership»."""
+    return refresh(force, timeout, url_file=AJAX_URL_FILE, cache=AJAX_CACHE)
 
 
 if __name__ == "__main__":
     cmd = sys.argv[1] if len(sys.argv) > 1 else ""
     if cmd == "refresh":
         print(refresh(force="--force" in sys.argv))
+    elif cmd == "refresh-ajax":
+        print(refresh_ajax(force="--force" in sys.argv))
     elif cmd == "expect":
         if not CACHE.exists():
             sys.exit(1)
@@ -190,5 +221,6 @@ if __name__ == "__main__":
         r = lookup(datetime.fromisoformat(sys.argv[2]), datetime.fromisoformat(sys.argv[3]))
         print({**r, "candidates": sorted(r["candidates"])})
     else:
-        print("usage: timetable.py refresh [--force] | expect [YYYY-MM-DD] | lookup START END")
+        print("usage: timetable.py refresh [--force] | refresh-ajax [--force] | "
+              "expect [YYYY-MM-DD] | lookup START END")
         sys.exit(2)
