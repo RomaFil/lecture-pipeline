@@ -72,12 +72,44 @@ def ensure_playlist(svc, title: str) -> str:
     return r["id"]
 
 
-def add_video(svc, playlist_id: str, video_id: str):
-    svc.playlistItems().insert(
-        part="snippet",
-        body={"snippet": {"playlistId": playlist_id,
-                          "resourceId": {"kind": "youtube#video", "videoId": video_id}}},
-    ).execute()
+def _in_playlist(svc, playlist_id: str, video_id: str) -> bool:
+    """Чи є відео вже в плейлісті (1 одиниця квоти)."""
+    r = svc.playlistItems().list(part="id", playlistId=playlist_id,
+                                 videoId=video_id, maxResults=1).execute()
+    return bool(r.get("items"))
+
+
+# Тимчасові відмови YouTube: 05.10.2026 перше додавання у щойно створений плейліст
+# ЦЗОПВ дало 409 «The operation was aborted» (плейліст ще не «встиг» на стороні
+# YouTube), і відео лишилось поза плейлістом — повтору не було. Тепер кілька
+# спроб із паузами; перед повтором перевіряємо, чи попередня спроба не пройшла
+# попри помилку, щоб не плодити дублі.
+RETRY_STATUSES = (409, 429, 500, 502, 503, 504)
+RETRY_DELAYS = (5, 20, 60)
+
+
+def add_video(svc, playlist_id: str, video_id: str, delays=RETRY_DELAYS, sleep=None):
+    import time
+    from googleapiclient.errors import HttpError
+    sleep = sleep or time.sleep
+    for attempt in range(len(delays) + 1):
+        try:
+            svc.playlistItems().insert(
+                part="snippet",
+                body={"snippet": {"playlistId": playlist_id,
+                                  "resourceId": {"kind": "youtube#video",
+                                                 "videoId": video_id}}},
+            ).execute()
+            return
+        except HttpError as e:
+            if e.resp.status not in RETRY_STATUSES or attempt == len(delays):
+                raise
+            sleep(delays[attempt])
+            try:
+                if _in_playlist(svc, playlist_id, video_id):
+                    return
+            except HttpError:
+                pass
 
 
 def place(video_id: str, subject: str) -> str:

@@ -397,5 +397,39 @@ r = clf.classify_voted(LONG, calendar={"code": "НЕ_ТАКИЙ_КОД"}, expect
 check("невідомий код календаря → стара логіка голосування", r["ok"] and r["subject"].startswith("Схемотехніка"), r)
 clf._request = _orig_request
 
+
+# --- 05.10.2026: тип у назві через кому + захист від «тренування» поза спортом ----
+_ONS = "Цивільний захист, оборона та патріотичне виховання — ОНС: Виживання та спеціальна підготовка, Т-1 З-1, Канюка, лекція (КПІ)"
+check("назва ОНС: тип — останнє слово через кому → лекція",
+      tt.parse_title(_ONS) == ("Цивільний захист, оборона та патріотичне виховання", "лекція"))
+check("назва ОНС: код дисципліни лишається ЦЗОПВ",
+      tt.subject_code(tt.parse_title(_ONS)[0]) == "ЦЗОПВ")
+check("назва ОНС без типу в кінці → None (як було)",
+      tt.parse_title("Цивільний захист, оборона та патріотичне виховання — ОНС: Виживання, Т-1 З-1, Канюка (КПІ)")[1] is None)
+check("назва: «Блок 7» → None, не ламається комами",
+      tt.parse_title("Цивільний захист, оборона та патріотичне виховання — Блок 7 (КПІ)")[1] is None)
+check("назва: тип посередині через кому не береться (лише останній)",
+      tt.parse_title("Предмет — тема, лекція, Іванов (КПІ)")[1] is None)
+
+_CZ = "ЦЗОПВ"
+CAL_CZ = {"code": _CZ, "kind": None, "summary": "Цивільний захист… (КПІ)", "candidates": {_CZ}}
+_orig_request2 = clf._request
+fake([_CZ, _CZ, _CZ], kinds=["тренування", "тренування", "лекція"])
+r = clf.classify_voted(LONG, calendar=CAL_CZ)
+check("РЕГРЕСІЯ 05.10: ЦЗОПВ, голоси «тренування» ігноруються → лекція", r["ok"] and r["kind"] == "лекція", r)
+fake([_CZ, _CZ, _CZ], kinds=["тренування"] * 3)
+r = clf.classify_voted(LONG, calendar=CAL_CZ)
+check("ЦЗОПВ, усі голоси «тренування» → «невідомо», не «тренування»", r["ok"] and r["kind"] == "невідомо", r)
+fake(["БОКС"] * 3, kinds=["тренування"] * 3)
+r = clf.classify_voted(LONG, calendar={"code": "БОКС", "kind": None, "summary": "Бокс — Єдиноборства (КПІ)", "candidates": {"БОКС"}})
+check("БОКС: «тренування» лишається валідним типом", r["ok"] and r["kind"] == "тренування", r)
+fake([_CZ, _CZ, _CZ], kinds=["тренування", "лекція", "тренування"])
+r = clf.classify_voted(LONG)
+check("без календаря: ЦЗОПВ, «тренування» ігнорується → лекція", r["ok"] and r["kind"] == "лекція", r)
+fake([_CZ, _CZ, _CZ], kinds=["тренування"] * 3)
+r = clf.classify_voted(LONG, calendar={**CAL_CZ, "kind": "лекція"})
+check("тип із календаря сильніший за будь-які голоси", r["ok"] and r["kind"] == "лекція", r)
+clf._request = _orig_request2
+
 print(f"\n{ok} passed, {fail} failed")
 sys.exit(1 if fail else 0)

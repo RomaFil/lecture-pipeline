@@ -71,6 +71,13 @@ def parse_title(summary: str):
         return None
     name, _, kind = s[:-len(SUFFIX)].strip().partition(" — ")
     kind = kind.strip().lower()
+    if kind not in KINDS:
+        # 05.10.2026: у подіях ОНС тема й викладач стоять у назві («ОНС: Виживання…,
+        # Т-1 З-1, Канюка, лекція»), тож тип може бути ОСТАННІМ словом через кому.
+        # Без цього тип лишався None, і його вгадувала LLM («тренування» для ОНС).
+        tokens = [t.strip() for t in kind.split(",")]
+        if len(tokens) > 1 and tokens[-1] in KINDS:
+            kind = tokens[-1]
     return name.strip(), (kind if kind in KINDS else None)
 
 

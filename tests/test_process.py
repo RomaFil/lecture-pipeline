@@ -539,5 +539,270 @@ except ImportError:
     print("SKIP pyyaml нема — YAML-перевірка метаданих пропущена")
 
 
+# --- записи без звуку (12.10.2026) -------------------------------------------
+# Пара, де викладач мовчав через тривогу, давала ERROR «транскрипт порожній»
+# щопівгодини, потім «вичерпані спроби» щоциклу. Тепер — розпізнати до whisper,
+# відео в skipped-silent/, один WARNING SILENT_SKIP:.
+import logging  # noqa: E402
+import shutil   # noqa: E402
+import subprocess  # noqa: E402
+
+# 1. sound_stats: інтервали тиші з silencedetect -> скільки в записі звуку.
+# Реальний вивід ffmpeg із тихого запису 12.10.2026 (скорочено до суті): тиша майже
+# на весь файл, з кількома короткими «просвітами» біля 3245-3260 с.
+_SD_REAL = ("[silencedetect @ 0x1] silence_start: -0.0000208333\n"
+            "[silencedetect @ 0x1] silence_end: 3243.67 | silence_duration: 3243.67\n"
+            "[silencedetect @ 0x1] silence_start: 3243.69\n"
+            "[silencedetect @ 0x1] silence_end: 3244.82 | silence_duration: 1.13\n"
+            "[silencedetect @ 0x1] silence_start: 3261.07\n")  # остання тиша — до кінця файлу
+_iv = process.transcript_quality.parse_silences(_SD_REAL, 5126.29)
+_st = process.sound_stats(_iv, 5126.29)
+check("sound_stats: реальний тихий запис -> менше 20 с звуку з 5126",
+      _st is not None and _st["sound_s"] < 20 and _st["fraction"] < 0.01, _st)
+check("sound_stats: незакрита тиша в кінці рахується до кінця файлу",
+      _iv[-1] == (3261.07, 5126.29), _iv)
+_st = process.sound_stats([(0.0, 1212.0)], 5518.0)
+check("sound_stats: нормальна пара (1212 с тиші з 5518) -> ≈78 % звуку",
+      abs(_st["fraction"] - 0.78) < 0.01, _st)
+check("sound_stats: тиші нема взагалі -> 100 % звуку",
+      process.sound_stats([], 100.0)["fraction"] == 1.0)
+check("sound_stats: тиша на весь файл -> 0 звуку",
+      process.sound_stats([(0.0, 100.0)], 100.0)["sound_s"] == 0.0)
+check("sound_stats: інтервал за межами файлу обрізається, звук не стає від'ємним",
+      process.sound_stats([(-5.0, 150.0)], 100.0)["sound_s"] == 0.0)
+check("sound_stats: тривалість невідома (0) -> None", process.sound_stats([], 0.0) is None)
+
+# 2. поріг: частка звуку < SOUND_MIN_FRACTION — тиша; None (збій виміру) — НЕ тиша
+check("поріг 1 % і рівень -40 дБ (змінюються лише свідомо)",
+      process.SOUND_MIN_FRACTION == 0.01 and process.SILENCE_NOISE_DB == "-40",
+      (process.SOUND_MIN_FRACTION, process.SILENCE_NOISE_DB))
+check("is_silent: 0,06 % звуку (запис 12.10) -> тиша",
+      process.is_silent({"duration": 5126.0, "sound_s": 3.0, "fraction": 3.0 / 5126.0}))
+check("is_silent: рівно 1 % -> НЕ тиша (суворе <)",
+      not process.is_silent({"duration": 100.0, "sound_s": 1.0, "fraction": 0.01}))
+check("is_silent: 78 % (нормальна пара) -> НЕ тиша",
+      not process.is_silent({"duration": 5518.0, "sound_s": 4306.0, "fraction": 0.78}))
+check("is_silent: збій виміру (None) -> НЕ тиша, запис іде звичайним шляхом",
+      not process.is_silent(None))
+
+
+# 3. справжній ffmpeg: синтетичні відео
+def _ffmpeg(*args):
+    r = subprocess.run(["ffmpeg", "-y", "-hide_banner", "-loglevel", "error", *args],
+                       capture_output=True, text=True)
+    if r.returncode != 0:
+        raise RuntimeError(r.stderr[-400:])
+
+
+_FX = Path(TMP) / "fx"
+_FX.mkdir(exist_ok=True)
+_VID = ["-f", "lavfi", "-i", "color=c=black:s=64x64:d=3:r=10"]
+_VENC = ["-c:v", "mpeg4", "-t", "3"]
+
+
+def _mk_video(name, audio_src=None):
+    """audio_src: lavfi-вираз джерела звуку, або None — відео без доріжки."""
+    p = _FX / name
+    if audio_src is None:
+        _ffmpeg(*_VID, *_VENC, "-an", str(p))
+    else:
+        _ffmpeg(*_VID, "-f", "lavfi", "-i", audio_src, *_VENC, "-c:a", "aac", str(p))
+    return p
+
+
+_SIL = _mk_video("silent.mkv", "anullsrc=r=16000:cl=mono")
+_TONE = _mk_video("tone.mkv", "sine=frequency=440:duration=3")   # пік ≈ -18 дБ
+_NOAUD = _mk_video("noaudio.mkv", None)
+# майже вся тиша + пів секунди помітного звуку (студент раз заговорив) — пік ≈ -20 дБ
+_BLIP = _mk_video("blip.mkv",
+                  "aevalsrc='if(between(t,1,1.5),0.1*sin(2*PI*440*t),0)':s=16000:d=3")
+# дуже тихий тон: -40 дБ поверх -18 -> пік ≈ -58 дБ, нижче порога
+_FAINT = _mk_video("faint.mkv", "sine=frequency=440:duration=3,volume=-40dB")
+
+
+def _wav_of(video):
+    w = _FX / (video.stem + ".wav")
+    process.extract_wav(video, w)
+    return w
+
+
+_v = process.measure_sound(_wav_of(_SIL))
+check("measure_sound: цифрова тиша -> 0 звуку", _v is not None and _v["sound_s"] < 0.5, _v)
+check("is_silent(реальна тиша)", process.is_silent(_v))
+_v = process.measure_sound(_wav_of(_TONE))
+check("measure_sound: тон на весь файл -> майже 100 % звуку", _v is not None and _v["fraction"] > 0.9, _v)
+check("is_silent(реальний тон) == False", not process.is_silent(_v))
+_v = process.measure_sound(_wav_of(_BLIP))
+check("3-с кліп із 0,5 с звуку (≈17 %) -> НЕ тиша: короткі тестові кліпи не викидаються",
+      not process.is_silent(_v), _v)
+_v = process.measure_sound(_wav_of(_FAINT))
+check("майже нечутний тон (пік ≈ -58 дБ, нижче -40) -> тиша", process.is_silent(_v), _v)
+check("measure_sound: неіснуючий файл -> None, без винятку",
+      process.measure_sound(_FX / "нема.wav") is None)
+
+# довші записи: відтворюють головний випадок — мало звуку на великому файлі.
+# 400 с: 1 с звуку (0,25 %) -> тиша; 12 с звуку (3 %) -> не тиша.
+# _mk_video обрізає відео до 3 с (-t 3), тож довгі файли (лише аудіо) збираємо напряму
+for _nm, _sec in (("long1.mkv", 1), ("long12.mkv", 12)):
+    _p = _FX / _nm
+    _ffmpeg("-f", "lavfi", "-i",
+            f"aevalsrc='if(between(t,100,{100 + _sec}),0.1*sin(2*PI*440*t),0)':s=16000:d=400",
+            "-c:a", "aac", str(_p))
+_v1 = process.measure_sound(_wav_of(_FX / "long1.mkv"))
+_v12 = process.measure_sound(_wav_of(_FX / "long12.mkv"))
+check("400 с із 1 с звуку (≈0,25 %) -> тиша", process.is_silent(_v1), _v1)
+check("400 с із 12 с звуку (≈3 %) -> НЕ тиша", not process.is_silent(_v12), _v12)
+
+check("has_audio_stream: відео з доріжкою -> True", process.has_audio_stream(_TONE) is True)
+check("has_audio_stream: відео БЕЗ доріжки -> False", process.has_audio_stream(_NOAUD) is False)
+check("has_audio_stream: неіснуючий файл -> None (не False!), обробка йде далі",
+      process.has_audio_stream(_FX / "нема.mkv") is None)
+
+
+# 4. process_one на тихому записі: ні whisper, ні YouTube, лише skipped-silent/
+class _Reached(Exception):
+    pass
+
+
+class _Cap(logging.Handler):
+    def __init__(self):
+        super().__init__()
+        self.recs = []
+
+    def emit(self, rec):
+        self.recs.append((rec.levelname, rec.getMessage()))
+
+
+_calls = {"transcribe": 0}
+
+
+def _fake_transcribe(wav, duration=0.0):
+    _calls["transcribe"] += 1
+    raise _Reached()
+
+
+_real_transcribe = process.transcribe
+process.transcribe = _fake_transcribe
+_scap = _Cap()
+process.log.addHandler(_scap)
+_sdb = process.open_db()
+
+
+def _drop(src, name=None):
+    dst = process.INCOMING / (name or src.name)
+    shutil.copy(src, dst)
+    return dst
+
+
+_f = _drop(_SIL, "2026-10-12 10-35-02.mkv")
+process.process_one(_sdb, _f)
+_sha = process.sha256_of(process.SILENT / "2026-10-12 10-35-02.mkv")
+_row = _sdb.execute("SELECT status, error FROM files WHERE sha256=?", (_sha,)).fetchone()
+check("тихий запис: пішов зі теки incoming", not _f.exists())
+check("тихий запис: лежить у skipped-silent/ цілий",
+      (process.SILENT / "2026-10-12 10-35-02.mkv").exists())
+check("тихий запис: whisper НЕ викликався", _calls["transcribe"] == 0, _calls)
+check("тихий запис: статус skipped_silent з причиною в error",
+      _row and _row[0] == "skipped_silent" and "майже немає звуку" in (_row[1] or ""), _row)
+_w = [m for lvl, m in _scap.recs if "SILENT_SKIP:" in m]
+check("тихий запис: рівно один рядок SILENT_SKIP:, і це WARNING",
+      len(_w) == 1 and [l for l, m in _scap.recs if "SILENT_SKIP:" in m] == ["WARNING"], _scap.recs)
+check("тихий запис: ім'я запису й тека є в рядку SILENT_SKIP",
+      _w and "2026-10-12 10-35-02.mkv" in _w[0] and "skipped-silent/" in _w[0], _w)
+check("тихий запис: жодного ERROR у лозі (перевірка 4 alert.sh мовчить)",
+      not any(l in ("ERROR", "CRITICAL") for l, _ in _scap.recs), _scap.recs)
+check("тихий запис: wav не лишився в work/", not list(process.WORK.glob("*.wav")))
+check("тихий запис: права 0640 (світових бітів нема)",
+      ((process.SILENT / "2026-10-12 10-35-02.mkv").stat().st_mode & 0o777) == 0o640,
+      oct((process.SILENT / "2026-10-12 10-35-02.mkv").stat().st_mode & 0o777))
+
+# дублікат: той самий файл прийшов знову -> видаляється з incoming, не обробляється вдруге
+_scap.recs.clear()
+_f2 = _drop(process.SILENT / "2026-10-12 10-35-02.mkv", "2026-10-12 10-35-02.mkv")
+process.process_one(_sdb, _f2)
+check("дублікат тихого запису: видалений з incoming", not _f2.exists())
+check("дублікат тихого запису: оригінал у skipped-silent/ лишився",
+      (process.SILENT / "2026-10-12 10-35-02.mkv").exists())
+check("дублікат тихого запису: другого SILENT_SKIP нема",
+      not any("SILENT_SKIP:" in m for _, m in _scap.recs), _scap.recs)
+
+# колізія імен: інший вміст під тим самим іменем не затирає наявний файл
+_other = _FX / "other.mkv"
+_ffmpeg(*_VID, "-f", "lavfi", "-i", "anullsrc=r=22050:cl=mono", *_VENC, "-c:a", "aac", str(_other))
+_dummy = process.SILENT / "collide.mkv"
+_dummy.write_bytes(b"x")
+_fc = _drop(_other, "collide.mkv")
+process.process_one(_sdb, _fc)
+_shas = sorted(p.name for p in process.SILENT.glob("*collide.mkv"))
+check("колізія імен: наявний файл не затертий", _dummy.read_bytes() == b"x")
+check("колізія імен: новий лежить під іменем <sha8>__…",
+      len(_shas) == 2 and any("__collide.mkv" in n for n in _shas), _shas)
+
+# запис без звукової доріжки
+_scap.recs.clear()
+_fn = _drop(_NOAUD, "noaudio-test.mkv")
+process.process_one(_sdb, _fn)
+check("відео без доріжки: у skipped-silent/, whisper не викликався",
+      (process.SILENT / "noaudio-test.mkv").exists() and not _fn.exists()
+      and _calls["transcribe"] == 0)
+check("відео без доріжки: SILENT_SKIP з поясненням «немає звукової доріжки», без ERROR",
+      any("SILENT_SKIP:" in m and "немає звукової доріжки" in m for _, m in _scap.recs)
+      and not any(l == "ERROR" for l, _ in _scap.recs), _scap.recs)
+
+# не тихі записи НЕ пропускаються: доходять до whisper
+for _nm, _src in (("tone-test.mkv", _TONE), ("blip-test.mkv", _BLIP)):
+    _calls["transcribe"] = 0
+    _fv = _drop(_src, _nm)
+    try:
+        process.process_one(_sdb, _fv)
+        _hit = False
+    except _Reached:
+        _hit = True
+    check(f"{_nm}: не тихий -> дійшов до whisper і лишився в incoming",
+          _hit and _calls["transcribe"] == 1 and _fv.exists() and
+          not (process.SILENT / _nm).exists(), (_hit, _calls))
+    _fv.unlink(missing_ok=True)
+    for _w in process.WORK.glob("*.wav"):
+        _w.unlink()
+
+# збій виміру гучності не валить обробку: запис іде далі
+_real_measure = process.measure_sound
+process.measure_sound = lambda wav: None
+_calls["transcribe"] = 0
+# окреме відео: тихий _SIL уже оброблений вище, і його копія була б дублікатом
+_SIL2 = _mk_video("silent2.mkv", "anullsrc=r=32000:cl=mono")
+_fm = _drop(_SIL2, "measure-fail.mkv")
+try:
+    process.process_one(_sdb, _fm)
+    _hit = False
+except _Reached:
+    _hit = True
+check("збій виміру гучності: тихий файл НЕ викинуто, іде до whisper (fail-open)",
+      _hit and _fm.exists(), _hit)
+process.measure_sound = _real_measure
+_fm.unlink(missing_ok=True)
+for _w in process.WORK.glob("*.wav"):
+    _w.unlink()
+
+# harden_modes знімає світові права й зі skipped-silent/
+_hm = process.SILENT / "harden-me.mkv"
+_hm.write_bytes(b"x")
+_hm.chmod(0o666)
+process.harden_modes()
+check("harden_modes: skipped-silent/ теж вирівнюється до 0640",
+      (_hm.stat().st_mode & 0o007) == 0, oct(_hm.stat().st_mode & 0o777))
+
+process.transcribe = _real_transcribe
+process.log.removeHandler(_scap)
+
+# 5. маркер у process.py і alert.sh — один і той самий (розʼїзд вимкнув би перевірку 19 мовчки)
+check("skip_silent логує маркер SILENT_SKIP: — його рахує alert.sh (перевірка 19)",
+      "SILENT_SKIP:" in inspect.getsource(process.skip_silent))
+check("alert.sh шукає той самий маркер SILENT_SKIP:",
+      _alert is not None and "grep -c 'SILENT_SKIP:'" in _alert.read_text(encoding="utf-8"),
+      str(_alert))
+check("alert.sh (перевірка 11) рахує skipped-silent серед записів дня",
+      _alert is not None and '"$BASE/skipped-silent"' in _alert.read_text(encoding="utf-8"))
+
 print(f"\nпройдено {ok}/{ok + fail}")
 sys.exit(0 if fail == 0 else 1)

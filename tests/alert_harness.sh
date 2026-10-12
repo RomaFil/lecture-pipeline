@@ -15,7 +15,7 @@ SRC="${1:-$HOME/lectures/bin/alert.sh}"
 
 T="$HOME/alerttest"
 rm -rf "$T"
-mkdir -p "$T/incoming" "$T/outgoing" "$T/archive" "$T/_needs-review" \
+mkdir -p "$T/incoming" "$T/outgoing" "$T/archive" "$T/_needs-review" "$T/skipped-silent" \
          "$T/logs" "$T/state/alerts" "$T/bin" "$T/shim" "$T/backups"
 
 # Перевірка 12 дивиться на теку бекапів сховища. Показуємо їй пісочницю, а не
@@ -83,7 +83,7 @@ ulograw() { printf '%s\n' "$1" >> "$LECTURE_UPDATE_LOG"; }
 ulog() { ulograw "$(/bin/date '+%F %T') $1"; }
 
 reset() {
-  rm -rf "$T/incoming"/* "$T/outgoing"/* "$T/archive"/* "$T/_needs-review"/* \
+  rm -rf "$T/incoming"/* "$T/outgoing"/* "$T/archive"/* "$T/_needs-review"/* "$T/skipped-silent"/* \
          "$T/state/alerts"/* "$T/fired.log" "$T/full.log" "$T/state/maintenance" \
          "$T/secrets/kpi_calendar.url" "$T/state/kpi_calendar.ics" "$T/expect.arg" \
          "$T/secrets/ajax_calendar.url" "$T/state/ajax_calendar.ics" 2>/dev/null
@@ -357,5 +357,55 @@ if [ -f "$T/state/alerts/.heartbeat" ]; then pass=$((pass+1)); echo "  OK   hear
 else fail=$((fail+1)); echo "  FAIL heartbeat відсутній"; fi
 
 echo
+
+echo "=== перевірка 18: відео не потрапило в плейліст ==="
+P1='WARNING не вдалося додати в плейліст (відео на місці, це не критично): <HttpError 409> | video=uACVqS_667M | дисципліна=Цивільний захист, оборона та патріотичне виховання'
+reset; "$T/bin/alert.sh" >/dev/null 2>&1
+cnt=$(cat "$T/state/alerts/playlist_fail.count")
+if [ "$cnt" = "0" ]; then pass=$((pass+1)); echo "  OK   18. база на порожньому лозі — один рядок 0"
+else fail=$((fail+1)); echo "  FAIL 18. база зіпсована: [$cnt]"; fi
+reset; printf '%s\n' "2026-10-05 12:43:18,597 $P1" >> "$T/logs/process.log"
+                                           H=12 D=3 run "18. історичний рядок на першому запуску — мовчить" SILENT playlist_fail
+printf '%s\n' "2026-10-06 12:43:18,597 $P1" >> "$T/logs/process.log"
+                                           H=12 D=3 run "18. нова невдача додавання в плейліст — кричить" FIRE playlist_fail
+if grep -q 'video=uACVqS_667M' "$T/full.log"; then pass=$((pass+1)); echo "  OK   18. повідомлення містить video_id для ручного виправлення"
+else fail=$((fail+1)); echo "  FAIL 18. у повідомленні немає video_id"; fi
+                                           H=12 D=3 run "18. штамп знято, коли нових подій немає" SILENT playlist_fail
+reset; "$T/bin/alert.sh" >/dev/null 2>&1
+printf '%s\n' "2026-10-06 12:50:00,000 INFO плейліст: додано у «Бокс» (PLxxx)" >> "$T/logs/process.log"
+                                           H=12 D=3 run "18. успішне додавання не рахується" SILENT playlist_fail
+
+echo "=== перевірка 19: запис без звуку пропущено ==="
+S1='WARNING SILENT_SKIP: звукова доріжка порожня (пік -78 дБ, середня -91 дБ, поріг -50 дБ) — на записі ніхто не говорив або не було джерела звуку | запис: 2026-10-12 10-35-02.mkv | тривалість: 85 хв | файл: skipped-silent/2026-10-12 10-35-02.mkv'
+reset; "$T/bin/alert.sh" >/dev/null 2>&1
+cnt=$(cat "$T/state/alerts/silent_skip.count")
+if [ "$cnt" = "0" ]; then pass=$((pass+1)); echo "  OK   19. база на порожньому лозі — один рядок 0"
+else fail=$((fail+1)); echo "  FAIL 19. база зіпсована: [$cnt]"; fi
+reset; printf '%s\n' "2026-10-12 13:00:00,000 $S1" >> "$T/logs/process.log"
+                                           H=12 D=3 run "19. історичний рядок на першому запуску — мовчить" SILENT silent_skip
+printf '%s\n' "2026-10-13 13:00:00,000 $S1" >> "$T/logs/process.log"
+                                           H=12 D=3 run "19. нова тиха пара — кричить" FIRE silent_skip
+if grep -q '2026-10-12 10-35-02.mkv' "$T/full.log"; then pass=$((pass+1)); echo "  OK   19. повідомлення називає запис"
+else fail=$((fail+1)); echo "  FAIL 19. у повідомленні немає імені запису"; fi
+if grep -q 'OBS' "$T/full.log" && grep -q 'нічого робити не треба' "$T/full.log"; then pass=$((pass+1)); echo "  OK   19. повідомлення пояснює обидва випадки (мовчали / зламаний OBS)"
+else fail=$((fail+1)); echo "  FAIL 19. немає пояснення обох випадків"; fi
+                                           H=12 D=3 run "19. штамп знято, коли нових подій немає" SILENT silent_skip
+reset; "$T/bin/alert.sh" >/dev/null 2>&1
+printf '%s\n' "2026-10-12 13:00:00,000 WARNING 2026-10-12 10-35-02.mkv: UNRECOGNIZED (щось інше)" >> "$T/logs/process.log"
+                                           H=12 D=3 run "19. сторонній WARNING не рахується" SILENT silent_skip
+# головне для 12.10: тихий запис НЕ шумить перевіркою 4 (ERROR) — лише WARNING
+reset; "$T/bin/alert.sh" >/dev/null 2>&1
+printf '%s\n' "2026-10-13 13:00:00,000 $S1" >> "$T/logs/process.log"
+                                           H=12 D=3 run "19. тиха пара не вмикає перевірку 4 (це WARNING, не ERROR)" SILENT process_error
+
+echo "=== перевірка 11 + тиха пара: skipped-silent рахується записом дня ==="
+sil() { touch "$T/skipped-silent/${TODAY} 10-35-02.mkv"; }
+reset; rec 2;        H=21 E=3 run "2 оброблені з 3 — кричить (контроль: без тихої пари недобір)" FIRE no_recording
+reset; rec 2; sil;   H=21 E=3 run "2 оброблені + 1 тиха = 3 з 3 — мовчить (регресія 12.10)" SILENT no_recording
+reset; rec 3; sil;   H=21 E=3 run "3 + 1 тиха = 4 з 3 — мовчить" SILENT no_recording
+reset; sil;          H=21 E=1 run "єдиний запис — тихий: 1 з 1 — мовчить" SILENT no_recording
+reset; touch -d '-3 days' "$T/skipped-silent/2020-01-01 10-35-02.mkv"
+                     H=21 E=1 run "тиха пара зі старою датою не рахується — кричить" FIRE no_recording
+
 echo "ПІДСУМОК: пройдено $pass, провалено $fail"
 [ "$fail" -eq 0 ]

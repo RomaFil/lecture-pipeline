@@ -32,6 +32,10 @@ OUTGOING = BASE / "outgoing"
 WORK = BASE / "work"
 ARCHIVE = BASE / "archive"
 REVIEW = BASE / "_needs-review"
+# Записи без звуку (12.10.2026): відео збережене, але не транскрибується й на
+# YouTube не йде. Окрема тека, а не _needs-review: це не «розбери вручну», а
+# «так і мало бути» — інакше алерт 2 кричав би про кожну тиху пару.
+SILENT = BASE / "skipped-silent"
 LOGS = BASE / "logs"
 DB_PATH = BASE / "state.db"
 LOCK_PATH = BASE / ".process.lock"
@@ -71,6 +75,21 @@ CHUNK_COUNT = int(os.getenv("CHUNK_COUNT", "2"))
 CHUNK_CPU_LIMIT = str(int(WHISPER_CPU_LIMIT) // CHUNK_COUNT) if CHUNK_ENABLE else None
 VIDEO_EXT = {".mkv", ".mp4", ".m4v", ".mov", ".webm", ".flv"}
 MAX_ATTEMPTS = 3
+# «Запис без звуку» = частка часу, коли звук гучніший за SILENCE_NOISE_DB
+# (ffmpeg silencedetect, паузи ≥0,5 с — той самий механізм, що й у
+# transcript_quality), менша за SOUND_MIN_FRACTION.
+#
+# Чому частка, а не пік гучності. Першу версію (пік < −50 дБ) спростували справжні
+# дані: у записі 12.10.2026, де викладач мовчав через тривогу, пік −11 дБ — кілька
+# секунд клацань, хоча мовлення в ньому нуль (whisper: 0 сегментів). Пік ловить
+# один звук і вважає запис живим.
+# Дані 12.10.2026: тихий запис — 2-3 с звуку з 5126 с (0,04-0,06 %); нормальні пари —
+# 78 % (08-33-53) і 77 % (Ajax 08.10). Між ними дві сотні разів запасу, тож 1 %
+# стоїть із запасом в обидва боки. −40 дБ, а не −50: кімнатний шум живого мікрофона
+# рідко вищий за −50, але мовлення майже завжди вище за −40.
+# Межа свідома: пара, де за 85 хв прозвучало менше хвилини, теж вважається тихою.
+SILENCE_NOISE_DB = os.getenv("LECTURE_SILENCE_NOISE_DB", "-40")
+SOUND_MIN_FRACTION = float(os.getenv("LECTURE_SOUND_MIN_FRACTION", "0.01"))
 # файл, змінений щойно, може ще докачуватись — чекаємо, поки він «устоїться»
 SETTLE_SECONDS = 60
 # скільки днів тримати відео на VPS після заливки, перш ніж видалити.
@@ -121,7 +140,7 @@ import yt_upload  # noqa: E402
 import chunked_transcribe  # noqa: E402
 import transcript_quality  # noqa: E402
 
-for d in (INCOMING, OUTGOING, WORK, ARCHIVE, REVIEW, LOGS):
+for d in (INCOMING, OUTGOING, WORK, ARCHIVE, REVIEW, SILENT, LOGS):
     d.mkdir(parents=True, exist_ok=True)
 
 logging.basicConfig(
@@ -235,6 +254,80 @@ def extract_wav(video: Path, wav: Path):
         ["ffmpeg", "-y", "-i", str(video), "-vn", "-ar", "16000", "-ac", "1", str(wav)],
         check=True, capture_output=True,
     )
+
+
+# ---------------------------------------------------------------- тихі записи
+
+def sound_stats(silences: list[tuple[float, float]], duration: float) -> dict | None:
+    """{"duration", "sound_s", "fraction"} зі списку інтервалів тиші; None, якщо
+    тривалість невідома. Інтервали обрізаються по [0, duration]."""
+    if duration <= 0:
+        return None
+    quiet = sum(max(0.0, min(b, duration) - max(a, 0.0)) for a, b in silences)
+    sound = max(0.0, duration - quiet)
+    return {"duration": duration, "sound_s": sound, "fraction": sound / duration}
+
+
+def measure_sound(wav: Path) -> dict | None:
+    """Скільки в аудіо звуку (див. SILENCE_NOISE_DB); None, якщо виміряти не вдалося.
+
+    None свідомо означає «не тихий» (див. is_silent): збій вимірювання не має
+    викидати запис — він піде звичайним шляхом, і whisper сам скаже, що там.
+    """
+    duration = probe_duration(wav)
+    try:
+        r = subprocess.run(
+            ["nice", "-n", "15", "ffmpeg", "-hide_banner", "-nostdin", "-i", str(wav),
+             "-af", f"silencedetect=noise={SILENCE_NOISE_DB}dB:d=0.5", "-f", "null", "-"],
+            capture_output=True, text=True, timeout=900)
+    except (OSError, subprocess.SubprocessError) as e:  # noqa: BLE001
+        log.warning("звук: вимір не вдався, обробка йде далі: %s", e)
+        return None
+    if r.returncode != 0:
+        log.warning("звук: ffmpeg silencedetect впав (код %s), обробка йде далі", r.returncode)
+        return None
+    return sound_stats(transcript_quality.parse_silences(r.stderr, duration), duration)
+
+
+def is_silent(snd: dict | None) -> bool:
+    return snd is not None and snd["fraction"] < SOUND_MIN_FRACTION
+
+
+def has_audio_stream(video: Path) -> bool | None:
+    """True/False — є чи нема звукової доріжки; None, якщо ffprobe не відповів.
+    Запис без доріжки (OBS із вимкненими джерелами звуку) зламав би extract_wav
+    помилкою ffmpeg, і та повторювалась би щоциклу, як і порожній транскрипт."""
+    try:
+        r = subprocess.run(
+            ["ffprobe", "-v", "error", "-select_streams", "a", "-show_entries",
+             "stream=index", "-of", "csv=p=0", str(video)],
+            capture_output=True, text=True, timeout=120)
+    except (OSError, subprocess.SubprocessError):  # noqa: BLE001
+        return None
+    if r.returncode != 0:
+        return None
+    return bool(r.stdout.strip())
+
+
+def skip_silent(db, video: Path, sha: str, duration: float, reason: str):
+    """Запис без звуку: відео — в skipped-silent/, статус skipped_silent.
+
+    Нічого не видаляє, не транскрибує, на YouTube не заливає. Один WARNING з
+    маркером SILENT_SKIP: (його рахує alert.sh, перевірка 19) — не ERROR, бо це
+    не збій: викладач міг мовчати (тривога), і тоді так і має бути.
+    """
+    dest = SILENT / video.name
+    if dest.exists():
+        dest = SILENT / f"{sha[:8]}__{video.name}"
+    shutil.move(str(video), str(dest))
+    try:
+        dest.chmod(VIDEO_MODE)
+    except OSError as e:  # noqa: BLE001
+        log.warning("права: не вдалося змінити %s: %s", dest.name, e)
+    set_status(db, sha, "skipped_silent", error=reason)
+    log.warning("SILENT_SKIP: %s | запис: %s | тривалість: %s | файл: skipped-silent/%s",
+                reason, video.name,
+                f"{duration/60:.0f} хв" if duration else "невідома", dest.name)
 
 
 def transcribe(wav: Path, duration: float = 0.0) -> dict:
@@ -414,7 +507,7 @@ def harden_modes():
     Робиться на початку кожного запуску, а не лише при обробці — інакше файл,
     який чекає в черзі години, весь цей час лежить доступним на запис.
     """
-    for d in (INCOMING, ARCHIVE, REVIEW):
+    for d in (INCOMING, ARCHIVE, REVIEW, SILENT):
         for p in d.glob("*"):
             try:
                 if p.is_file() and (p.stat().st_mode & 0o007):
@@ -441,7 +534,7 @@ def process_one(db, video: Path):
     sha = sha256_of(video)
     row = db.execute(
         "SELECT status, attempts, video_id FROM files WHERE sha256=?", (sha,)).fetchone()
-    if row and row[0] in ("done", "needs_review"):
+    if row and row[0] in ("done", "needs_review", "skipped_silent"):
         log.warning("%s: вже оброблений (%s), видаляю дублікат з incoming", video.name, row[0])
         video.unlink()
         return
@@ -478,9 +571,27 @@ def process_one(db, video: Path):
         log.warning("%s: ЗАДОВГЕ (%s) → _needs-review, не транскрибується", video.name, reason)
         return
 
+    # 0a. запис без звуку — ДО whisper (12.10.2026). Пара, де викладач мовчав через
+    # тривогу, давала «транскрипт порожній» і ERROR щопівгодини, поки не вичерпувались
+    # спроби, а потім ще й «вичерпані спроби» щоциклу. Це не збій, а запис без мовлення.
+    if has_audio_stream(video) is False:
+        skip_silent(db, video, sha, duration, "у файлі немає звукової доріжки")
+        return
+
     # 1. аудіо
     wav = WORK / (sha[:12] + ".wav")
     extract_wav(video, wav)
+    snd = measure_sound(wav)
+    if snd:
+        log.info("звук: %.0f с із %.0f с вище %s дБ (%.2f %%)", snd["sound_s"],
+                 snd["duration"], SILENCE_NOISE_DB, snd["fraction"] * 100)
+    if is_silent(snd):
+        wav.unlink(missing_ok=True)
+        skip_silent(db, video, sha, duration,
+                    f"майже немає звуку: {snd['sound_s']:.0f} с із {snd['duration']/60:.0f} хв "
+                    f"({snd['fraction']*100:.2f} %, поріг {SOUND_MIN_FRACTION*100:.0f} %) — "
+                    f"на записі ніхто не говорив або не було джерела звуку")
+        return
 
     # 2. транскрипція
     tr = transcribe(wav, duration)
@@ -602,7 +713,8 @@ def process_one(db, video: Path):
         playlist_url = f"https://youtube.com/playlist?list={pid}"
         log.info("плейліст: додано у «%s» (%s)", res["subject"], pid)
     except Exception as e:  # noqa: BLE001
-        log.warning("не вдалося додати в плейліст (відео на місці, це не критично): %s", e)
+        log.warning("не вдалося додати в плейліст (відео на місці, це не критично): %s | video=%s | дисципліна=%s",
+                    e, video_id, res["subject"])
 
     # 7. транскрипт у outgoing.
     # Час запису в імені файлу обов'язковий: `title` містить лише дату, і два

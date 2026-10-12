@@ -384,6 +384,18 @@ def _apply_schedule_single(result: dict, expected: set) -> dict:
     }
 
 
+def _sport_guard(kinds: list, code) -> list:
+    """«тренування» — тип лише для спорту (БОКС); в інших дисциплінах це помилка LLM.
+
+    05.10.2026: пара ОНС (лекція про військово-політичну ситуацію) вийшла з типом
+    «тренування» — модель побачила «військову підготовку» й обрала спортивний тип.
+    Для не-спортивних дисциплін такий голос рахуємо утриманням («невідомо»).
+    """
+    if code == "БОКС":
+        return list(kinds)
+    return ["невідомо" if k == "тренування" else k for k in kinds]
+
+
 def _pick_kind(kinds: list, fallback: str) -> str:
     """Тип заняття: більшість голосів усіх фрагментів; «невідомо» — утримання, а не голос.
 
@@ -445,7 +457,8 @@ def _classify_by_calendar(parts: list, transcript: str, n: int, calendar: dict) 
                 "raw": base_raw}
 
     full, slug = SUBJECTS[code]
-    kind = calendar.get("kind") or _pick_kind(kinds, kinds[idx])
+    kinds_g = _sport_guard(kinds, code)
+    kind = calendar.get("kind") or _pick_kind(kinds_g, kinds_g[idx])
     note = "" if all(v == code for v in votes) else f"календар {code} переважив голоси {votes}"
     return {
         "ok": True,
@@ -533,7 +546,8 @@ def classify_voted(transcript: str, n: int = 5000, expected: set = None,
         }
 
     full, slug = SUBJECTS[win]
-    kind = _pick_kind(kinds, kinds[idx])
+    kinds_g = _sport_guard(kinds, win)
+    kind = _pick_kind(kinds_g, kinds_g[idx])
     return {
         "ok": True,
         "subject": full,
