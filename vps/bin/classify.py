@@ -227,8 +227,14 @@ def _request(system: str, text: str, keep_alive: str = None) -> dict:
             "keep_alive": KEEP_ALIVE if keep_alive is None else keep_alive,
             # num_predict — страховка від зациклення малої моделі:
             # відповідь за схемою вкладається у ~80 токенів.
+            # num_thread=3: Ollama 0.33 ігнорує OLLAMA_NUM_THREAD і бере всі 6 ядер,
+            # а cpulimit -l 400 періодично зупиняє llama-server — потоки, що
+            # крутяться в очікуванні, гальмують у ~100 разів (0.08 ток/с, виклик
+            # 15–29 хв проти таймауту 30 хв; інцидент 026). 3 потоки вкладаються
+            # у ліміт 400 %.
             "options": {"temperature": 0, "num_predict": 250,
-                        "num_ctx": 8192, "repeat_penalty": 1.1},
+                        "num_ctx": 8192, "repeat_penalty": 1.1,
+                        "num_thread": 3},
         },
         timeout=1800,
     )
