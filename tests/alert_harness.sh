@@ -211,10 +211,10 @@ reset; old '-10 days' "$T/archive/z.mkv";  H=12 D=3 run "5. архів не по
 reset; old '-5 hours' "$T/state/pc-status.env"; H=12 D=3 run "6. ПК мовчить 5 год — спить, мовчить (27.09)" SILENT pc_stale
 reset; old '-25 hours' "$T/state/pc-status.env"; H=12 D=3 run "6. ПК мовчить понад добу — кричить" FIRE pc_stale
 reset; old '-25 hours' "$T/state/pc-status.env"; H=3  D=3 run "6. понад добу, але 03:00 — не будимо" SILENT pc_stale
-reset; sed -i 's/^disk_free_gb=.*/disk_free_gb=25/' "$T/state/pc-status.env"
-                                           H=12 D=3 run "7. диск 25 ГБ — кричить (поріг 30)" FIRE pc_disk
-reset; sed -i 's/^disk_free_gb=.*/disk_free_gb=35/' "$T/state/pc-status.env"
-                                           H=12 D=3 run "7. диск 35 ГБ — мовчить" SILENT pc_disk
+reset; sed -i 's/^disk_free_gb=.*/disk_free_gb=4/' "$T/state/pc-status.env"
+                                           H=12 D=3 run "7. диск 4 ГБ — кричить (поріг 5)" FIRE pc_disk
+reset; sed -i 's/^disk_free_gb=.*/disk_free_gb=6/' "$T/state/pc-status.env"
+                                           H=12 D=3 run "7. диск 6 ГБ — мовчить" SILENT pc_disk
 reset; sed -i 's/^pending_oldest_h=.*/pending_oldest_h=8/' "$T/state/pc-status.env"
                                            H=12 D=3 run "8. записи лежать на ПК" FIRE pc_pending
 reset; sed -i 's/^task_timeouts_24h=.*/task_timeouts_24h=4/' "$T/state/pc-status.env"
