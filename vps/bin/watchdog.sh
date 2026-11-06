@@ -70,7 +70,7 @@ if [ "$(date +%-H)" -ge "$DIGEST_HOUR" ] && [ "$last_digest" != "$today" ]; then
 
     n_in=$(find "$BASE/incoming"      -type f 2>/dev/null | wc -l)
     n_out=$(find "$BASE/outgoing"     -type f 2>/dev/null | wc -l)
-    n_rev=$(find "$BASE/_needs-review" -type f 2>/dev/null | wc -l)
+    n_rev=$(find "$BASE/_needs-review" -type f ! -name '*.md' 2>/dev/null | wc -l)
     n_arch=$(find "$BASE/archive"     -type f 2>/dev/null | wc -l)
 
     # скільки лекцій пішло в обробку за минулу добу

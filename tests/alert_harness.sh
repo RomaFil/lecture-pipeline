@@ -169,7 +169,8 @@ reset; rec 4; sed -i 's/^recordings_today=.*/recordings_today=-1/' "$T/state/pc-
               H=21 E=4 run "ПК прислав -1 — не віднімає і не додає" SILENT no_recording
 
 echo "=== решта умов (регресія) ==="
-reset; touch "$T/_needs-review/z.md";      H=12 D=3 run "2. needs-review" FIRE needs_review
+reset; touch "$T/_needs-review/z.mkv"; touch "$T/_needs-review/z.md"; H=12 D=3 run "2. needs-review (відео + .md = 1 запис)" FIRE needs_review
+reset; touch "$T/_needs-review/z.md";      H=12 D=3 run "2. needs-review: сам .md не рахується" SILENT needs_review
 reset; old '-6 hours' "$T/incoming/z.mkv"; H=12 D=3 run "3. incoming стоїть" FIRE incoming_stuck
 reset; old '-6 hours' "$T/incoming/z.mkv"; touch -d '+2 hours' "$T/state/maintenance"
                                            H=12 D=3 run "3. прапорець обслуговування діє — мовчить" SILENT incoming_stuck

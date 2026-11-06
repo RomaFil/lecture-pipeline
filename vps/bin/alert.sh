@@ -135,9 +135,9 @@ elif [ "$stuck_out" -eq 0 ] || [ "$pc_age_min" -gt "$PC_AWAKE_MIN" ]; then
 fi
 
 # --- 2. Класифікатор не впізнав дисципліну -----------------------------------
-nrev=$(find "$BASE/_needs-review" -type f 2>/dev/null | wc -l)
+nrev=$(find "$BASE/_needs-review" -type f ! -name '*.md' 2>/dev/null | wc -l)
 if [ "$nrev" -gt 0 ]; then
-    names=$(find "$BASE/_needs-review" -type f -printf '  %P\n' 2>/dev/null | head -5)
+    names=$(find "$BASE/_needs-review" -type f ! -name '*.md' -printf '  %P\n' 2>/dev/null | head -5)
     fire needs_review "$(printf '%s\n' \
         "⚠️ Конвеєр лекцій: потрібен ручний розбір" \
         "" \
