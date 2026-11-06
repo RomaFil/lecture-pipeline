@@ -11,3 +11,20 @@
 # виключені через flock всередині process.py.
 # Тут же відбувається прибирання архіву — тому воно працює й у дні без записів.
 */30 * * * * /home/user/lectures/bin/run.sh >> /home/user/lectures/logs/run.log 2>&1
+
+# --- сторож і допоміжні задачі (див. розділ «Сторож і алерти» в README) ------
+# Семплер стану VPS: знімок кожні 30 с, лог 7 днів — для розбору зависань.
+* * * * * /home/user/lectures/bin/sampler.sh >/dev/null 2>&1
+
+# Алерти в телеграм: 11 умов (застряглі черги, ERROR, мало місця на ПК тощо).
+*/15 * * * * /home/user/lectures/bin/alert.sh >> /home/user/lectures/logs/alert.log 2>&1
+
+# Сторож для сторожа (heartbeat) + добовий дайджест.
+*/30 * * * * /home/user/lectures/bin/watchdog.sh >> /home/user/lectures/logs/alert.log 2>&1
+
+# Гарантує, що cpulimit-монітор llama-server живий між перезавантаженнями.
+*/15 * * * * /home/user/lectures/bin/ensure-ollama-cpulimit.sh
+
+# Зовнішній dead man's switch: пінг healthchecks.io. URL лежить у
+# ~/lectures/secrets/healthchecks.env (HC_PING_URL=..., права 600), не в репо.
+*/15 * * * * /home/user/lectures/bin/healthcheck-ping.sh >> /home/user/lectures/logs/healthcheck-ping.log 2>&1
